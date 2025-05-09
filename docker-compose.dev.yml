@@ -1,0 +1,26 @@
+services:
+  app:
+    # Override the app’s entrypoint to include a debug agent
+    entrypoint: [ "java","-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005",
+                  "-Xms512m","-Xmx800m","-jar","/app/app.jar" ]
+
+    # Reuse the build & mongo from main compose
+    extends:
+      file: docker-compose.yml
+      service: app
+
+    # Mount code & resources for DevTools
+    volumes:
+      - ./target/classes:/app/classes
+      - ./src/main/resources:/app/resources
+      - ./src/main/java:/app/src/main/java
+
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+
+    # Expose the DevTools port, debugging & web server
+    # (default LiveReload is 35729)
+    ports:
+      - "35729:35729"
+      - "8080:8080"
+      - "5005:5005"

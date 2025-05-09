@@ -1,0 +1,28 @@
+services:
+  mongo:
+    image: mongo:8.0
+    container_name: storage-app-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: storage-app
+    ports:
+      - "8080:8080"
+    environment:
+      # point Spring at the mongo service
+      SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/storage-db
+    depends_on:
+      - mongo
+    mem_limit: 1g # 1 GB RAM max
+    tmpfs:
+      # limit /tmp (where Spring will spool uploads) to 200 MB
+      - /tmp:rw,size=200m
+
+volumes:
+  mongo-data:
