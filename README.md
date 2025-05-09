@@ -1,0 +1,286 @@
+# STORAGE Application
+
+A minimal RESTful application for storing and retrieving files using Spring Boot and MongoDB GridFS.
+
+## Features
+
+*   Upload files with visibility (PUBLIC/PRIVATE) and tags.
+*   Prevent duplicate uploads per user based on filename or content.
+*   Automatic file type detection upon upload (using Apache Tika).
+*   List public files or files owned by a specific user.
+*   Filter file lists by tag (case-insensitive).
+*   Sort file lists by filename, upload date, content type, or size.
+*   Paginated file lists.
+*   Change filename of uploaded files.
+*   Delete files (only by owner).
+*   Unique, non-guessable download links for files.
+
+## Prerequisites
+
+*   Java 21
+*   Maven 3.8+
+*   Docker & Docker Compose (for running MongoDB or the application in a container)
+
+## Running Locally
+
+1.  **MongoDB Setup**:
+    Ensure you have a MongoDB instance running. You can use Docker:
+    ```bash
+    docker-compose up -d mongo 
+    ```
+    This will start a MongoDB instance accessible on `localhost:27017`.
+
+2.  **Application**:
+    Run the Spring Boot application using Maven:
+    ```bash
+    mvn spring-boot:run
+    ```
+    The application will be accessible at `http://localhost:8080`.
+    The `X-User-Id` header is used for user identification in API requests.
+
+## Building Docker Image
+
+To build the application Docker image:
+```bash
+mvn spring-boot:build-image -Dspring-boot.build-image.imageName=your-dockerhub-username/storage-app
+```
+(Replace `your-dockerhub-username` if you plan to push it)
+
+Alternatively, to build the JAR first and then use the `Dockerfile`:
+
+### Building the Application JAR
+
+To build the executable JAR file locally (e.g., for manual Docker builds or deployment):
+```bash
+mvn clean package
+```
+This will produce `storage-app-0.0.1-SNAPSHOT.jar` in the `target/` directory. The `Dockerfile` uses this JAR.
+
+Then, you can build the Docker image using the Docker CLI:
+```bash
+docker build -t your-image-name:latest .
+```
+
+### Running with Docker Compose
+
+Once the image is built (either via `spring-boot:build-image` or `docker build`), you can run the entire application using Docker Compose:
+```bash
+docker-compose up -d app
+```
+Or, for development with live reload (this will build the image using the Dockerfile if not present):
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build app
+```
+
+## API Documentation
+
+The STORAGE application provides a RESTful API for managing files.
+
+**Base URL**: `/api/v1`
+
+**User Identification**: All endpoints requiring user context expect an `X-User-Id` header providing the ID of the user performing the operation (e.g., `X-User-Id: user123`).
+
+### Endpoints
+
+#### 1. Upload File
+
+*   **POST** `/api/v1/files`
+*   **Description**: Uploads a new file with associated metadata.
+*   **Request Type**: `multipart/form-data`
+*   **Headers**:
+    *   `X-User-Id: <USER_ID_STRING>` (Required)
+*   **Form Parts**:
+    *   `file`: The binary file content (e.g., `@path/to/your/file.txt`).
+    *   `properties`: A JSON object part describing file attributes. Set `Content-Type` for this part to `application/json`.
+        *Example JSON for `properties` part*:
+        ```json
+        {
+          "filename": "your-document.pdf",
+          "visibility": "PRIVATE", 
+          "tags": ["important", "project-alpha"] 
+        }
+        ```
+        *Field Details*:
+            *   `filename` (string, required, not blank): The desired filename for storage.
+            *   `visibility` (string, required, enum: `PUBLIC`, `PRIVATE`): File visibility.
+            *   `tags` (array of strings, optional, max 5 elements): Tags associated with the file. Stored in lowercase.
+*   **Success Response (201 Created)**:
+    *   `Location` Header: URL to the download endpoint for the created file (e.g., `/api/v1/files/download/unique-token`).
+    *   Body (`FileResponse`):
+        ```json
+        {
+          "id": "609c1f3e7f3b7c1b3e7f3b7c",
+          "filename": "your-document.pdf",
+          "visibility": "PRIVATE",
+          "tags": ["important", "project-alpha"],
+          "uploadDate": "2023-05-15T10:30:00.000+00:00",
+          "contentType": "application/pdf",
+          "size": 1024768, 
+          "downloadLink": "/api/v1/files/download/unique-download-token-string"
+        }
+        ```
+*   **Error Responses**:
+    *   `400 Bad Request`: DTO validation errors (e.g., blank filename, >5 tags), or invalid arguments.
+    *   `409 Conflict`: File with the same name or content already exists for the user.
+    *   `500 Internal Server Error`: Unexpected server errors.
+*   **Example cURL**:
+    ```bash
+    curl -X POST -H "X-User-Id: user123" \
+         -F "file=@/path/to/local/file.pdf" \
+         -F "properties=_{\"filename\":\"my-api-doc.pdf\", \"visibility\":\"PRIVATE\", \"tags\":[\"api\", \"docs\"]};type=application/json" \
+         http://localhost:8080/api/v1/files
+    ```
+
+#### 2. List Files
+
+*   **GET** `/api/v1/files`
+*   **Description**: Lists files. If `X-User-Id` header is provided, lists files for that user (both PUBLIC and PRIVATE). If the header is omitted, lists all PUBLIC files from all users.
+*   **Headers**:
+    *   `X-User-Id: <USER_ID_STRING>` (Optional)
+*   **Query Parameters**:
+    *   `tag` (string, optional): Filter by a specific tag (case-insensitive match).
+    *   `sortBy` (string, optional, default: `uploadDate`): Field to sort by. Valid values: `filename`, `uploadDate`, `contentType`, `size`, `tag`.
+    *   `sortDir` (string, optional, default: `desc`): Sort direction. Valid values: `asc`, `desc`.
+    *   `page` (int, optional, default: `0`): Page number (0-indexed).
+    *   `size` (int, optional, default: `10`): Number of items per page.
+*   **Success Response (200 OK)**: A paginated list of `FileResponse` objects.
+    ```json
+    {
+      "content": [
+        {
+          "id": "fileId1", "filename": "file1.txt", 
+          "visibility": "PUBLIC", "tags": ["tagA"], 
+          "uploadDate": "2023-05-15T12:00:00.000+00:00", 
+          "contentType": "text/plain", "size": 1024,
+          "downloadLink": "/api/v1/files/download/token1"
+        }
+      ],
+      "pageable": {
+        "sort": { "sorted": true, "unsorted": false, "empty": false },
+        "offset": 0,
+        "pageNumber": 0,
+        "pageSize": 10,
+        "paged": true,
+        "unpaged": false
+      },
+      "totalPages": 1,
+      "totalElements": 1,
+      "last": true,
+      "size": 10,
+      "number": 0,
+      "sort": { "sorted": true, "unsorted": false, "empty": false },
+      "numberOfElements": 1,
+      "first": true,
+      "empty": false
+    }
+    ```
+*   **Error Responses**:
+    *   `500 Internal Server Error`.
+*   **Example cURL (List public files, tag "work", sort by filename)**:
+    ```bash
+    curl -X GET "http://localhost:8080/api/v1/files?tag=work&sortBy=filename&sortDir=asc&page=0&size=5"
+    ```
+*   **Example cURL (List files for user "user123")**:
+    ```bash
+    curl -X GET -H "X-User-Id: user123" "http://localhost:8080/api/v1/files?page=0&size=5"
+    ```
+
+#### 3. Download File
+
+*   **GET** `/api/v1/files/download/{token}`
+*   **Description**: Downloads the content of a specific file using its unique download token.
+*   **Path Parameters**:
+    *   `token` (string, required): The file's unique download token.
+*   **Success Response (200 OK)**:
+    *   Headers: `Content-Type`, `Content-Disposition: attachment; filename="<FILENAME>"`, `Content-Length`.
+    *   Body: The raw binary content of the file.
+*   **Error Responses**:
+    *   `404 Not Found`: If no file matches the provided token.
+*   **Example cURL**:
+    ```bash
+    curl -X GET http://localhost:8080/api/v1/files/download/your-unique-download-token -o downloaded_file_name
+    ```
+
+#### 4. Update File Details (Filename)
+
+*   **PATCH** `/api/v1/files/{fileId}`
+*   **Description**: Changes the filename of a file owned by the user.
+*   **Headers**:
+    *   `X-User-Id: <USER_ID_STRING>` (Required)
+*   **Path Parameters**:
+    *   `fileId` (string, required): The ID (ObjectId hex string) of the file to update.
+*   **Request Body** (`application/json`, `FileUpdateRequest`):
+    ```json
+    {
+      "newFilename": "new-report-name.docx"
+    }
+    ```
+    *   `newFilename` (string, required, not blank)
+*   **Success Response (200 OK)**: `FileResponse` with updated details.
+*   **Error Responses**:
+    *   `400 Bad Request`: Invalid `newFilename` (e.g., blank).
+    *   `404 Not Found`: File not found for the user or user not authorized.
+    *   `409 Conflict`: The `newFilename` already exists for another file owned by the user.
+    *   `500 Internal Server Error`: If the update operation fails for other reasons.
+*   **Example cURL**:
+    ```bash
+    curl -X PATCH -H "X-User-Id: user123" \
+         -H "Content-Type: application/json" \
+         -d "{\"newFilename\":\"updated_report.pdf\"}" \
+         http://localhost:8080/api/v1/files/your_file_id
+    ```
+
+#### 5. Delete File
+
+*   **DELETE** `/api/v1/files/{fileId}`
+*   **Description**: Deletes a file owned by the user.
+*   **Headers**:
+    *   `X-User-Id: <USER_ID_STRING>` (Required)
+*   **Path Parameters**:
+    *   `fileId` (string, required): The ID (ObjectId hex string) of the file to delete.
+*   **Success Response (204 No Content)**: Empty body.
+*   **Error Responses**:
+    *   `404 Not Found`: File not found for the user or user not authorized.
+*   **Example cURL**:
+    ```bash
+    curl -X DELETE -H "X-User-Id: user123" http://localhost:8080/api/v1/files/your_file_id
+    ```
+
+### Error Response Structure
+
+When an error occurs (e.g., 4xx or 5xx status codes), the API generally returns a JSON body with the following structure:
+
+```json
+{
+  "timestamp": 1678886400000, 
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed", 
+  "errors": [ "filename: Filename must not be blank" ] 
+}
+```
+Or for non-validation errors (example for 404):
+```json
+{
+  "timestamp": 1678886400000, 
+  "status": 404,
+  "error": "Not Found",
+  "message": "File not found for token: some-token"
+}
+```
+
+## Development Notes
+
+### MongoDB Indexes
+The application relies on several MongoDB indexes on the `fs.files` collection for efficient querying and to enforce uniqueness constraints. These indexes are defined using `@Indexed` and `@CompoundIndex` annotations on the `com.example.storage_app.model.FileRecord` entity, and Spring Boot attempts to create them automatically.
+
+Upon application startup when connected to a MongoDB instance, you should see logs from `org.springframework.data.mongodb.core.index.MongoPersistentEntityIndexCreator` indicating index creation activity.
+
+You can manually verify the indexes by connecting to your MongoDB instance using `mongoSH` and running:
+```shell
+use storage-db # Or your configured database name
+db.fs.files.getIndexes()
+```
+Ensure the indexes listed in `CONSIDERATIONS.md` (Section 13) or implied by `FileRecord.java` annotations are present for optimal performance.
+
+Key indexes include those on `metadata.ownerId` combined with `filename` or `metadata.sha256`, `metadata.token`, `metadata.visibility`, and `metadata.tags`. 
