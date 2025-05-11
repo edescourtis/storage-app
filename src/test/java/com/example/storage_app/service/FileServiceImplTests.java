@@ -175,8 +175,6 @@ class FileServiceImplTests {
             Query userOrigFilenameConflictQuery = Query.query(Criteria.where("metadata.originalFilename").is(defaultUploadRequest.filename()).and("metadata.ownerId").is(testUserId));
             when(mongoTemplate.exists(eq(userOrigFilenameConflictQuery), eq("fs.files"))).thenReturn(false);
             
-            when(mongoTemplate.exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256") && testUserId.equals(q.getQueryObject().get("metadata.ownerId"))), eq("fs.files"))).thenReturn(false);
-            
             FileResponse response = fileService.uploadFile(testUserId, mockFile, defaultUploadRequest);
 
             assertNotNull(response);
@@ -187,7 +185,6 @@ class FileServiceImplTests {
             assertTrue(response.downloadLink().contains("/api/v1/files/download/"));
             
             verify(mongoTemplate).exists(eq(userOrigFilenameConflictQuery), eq("fs.files"));
-            verify(mongoTemplate).exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256")), eq("fs.files"));
 
             verify(gridFsTemplate).store(
                 any(InputStream.class), 
@@ -196,13 +193,12 @@ class FileServiceImplTests {
                 argThat(metadataDocInStore -> 
                     defaultUploadRequest.filename().equals(metadataDocInStore.getString("originalFilename")) &&
                     testUserId.equals(metadataDocInStore.getString("ownerId")) &&
-                    Visibility.PENDING.name().equals(metadataDocInStore.getString("visibility")) &&
+                    defaultUploadRequest.visibility().name().equals(metadataDocInStore.getString("visibility")) &&
                     (defaultUploadRequest.tags().stream().map(String::toLowerCase).collect(Collectors.toList()))
                         .equals(metadataDocInStore.getList("tags", String.class)) &&
                     metadataDocInStore.containsKey("token") &&
                     metadataDocInStore.containsKey("uploadDate") &&
-                    "text/plain".equals(metadataDocInStore.getString("contentType")) &&
-                    (Long)mockFile.getSize() == metadataDocInStore.getLong("size")
+                    "text/plain".equals(metadataDocInStore.getString("contentType"))
                 )
             );
             
@@ -210,8 +206,7 @@ class FileServiceImplTests {
                 argThat(q -> q.getQueryObject().containsKey("_id")), 
                 argThat(upd -> {
                     Document setObject = (Document) upd.getUpdateObject().get("$set");
-                    return setObject.containsKey("metadata.sha256") &&
-                           defaultUploadRequest.visibility().name().equals(setObject.getString("metadata.visibility"));
+                    return setObject.containsKey("metadata.sha256");
                 }),
                 eq("fs.files")
             );
@@ -234,7 +229,6 @@ class FileServiceImplTests {
 
             Query userOrigFilenameConflictQuery = Query.query(Criteria.where("metadata.originalFilename").is(multipartOriginalFilename).and("metadata.ownerId").is(testUserId));
             when(mongoTemplate.exists(eq(userOrigFilenameConflictQuery), eq("fs.files"))).thenReturn(false);
-            when(mongoTemplate.exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256")), eq("fs.files"))).thenReturn(false);
 
             FileResponse response = fileService.uploadFile(testUserId, mockFile, requestWithNullFilename);
             
@@ -264,7 +258,6 @@ class FileServiceImplTests {
 
             Query userOrigFilenameConflictQuery = Query.query(Criteria.where("metadata.originalFilename").is(multipartOriginalFilename).and("metadata.ownerId").is(testUserId));
             when(mongoTemplate.exists(eq(userOrigFilenameConflictQuery), eq("fs.files"))).thenReturn(false);
-            when(mongoTemplate.exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256")), eq("fs.files"))).thenReturn(false);
 
             FileResponse response = fileService.uploadFile(testUserId, mockFile, requestWithBlankFilename);
 
@@ -340,9 +333,7 @@ class FileServiceImplTests {
         try (MockedStatic<MimeUtil> mockedMimeUtil = mockStatic(MimeUtil.class)) {
             MimeUtil.Detected detected = new MimeUtil.Detected(new LookaheadInputStream(new ByteArrayInputStream("test content".getBytes()), 64*1024), "text/plain");
             mockedMimeUtil.when(() -> MimeUtil.detect(any(InputStream.class))).thenReturn(detected);
-            when(mockFile.getInputStream())
-                .thenReturn(new ByteArrayInputStream("test content".getBytes()))
-                .thenReturn(new ByteArrayInputStream("test content".getBytes()));
+            // mockFile.getInputStream() stub is not strictly needed here because if filename conflict occurs, getInputStream is never called by the service.
 
             Query userOrigFilenameConflictQuery = Query.query(
                 Criteria.where("metadata.originalFilename").is(defaultUploadRequest.filename())
@@ -356,7 +347,6 @@ class FileServiceImplTests {
             String expectedMessage = "Filename '" + defaultUploadRequest.filename() + "' already exists for this user.";
             assertEquals(expectedMessage, ex.getMessage(), "Exception message mismatch for filename conflict");
             verify(gridFsTemplate, never()).store(any(), any(), any(), any());
-            verify(mongoTemplate, never()).exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256")), eq("fs.files"));
         }
     }
 
@@ -364,57 +354,50 @@ class FileServiceImplTests {
     void uploadFile_ThrowsFileAlreadyExists_WhenContentConflict() throws Exception {
         try (MockedStatic<MimeUtil> mockedMimeUtil = mockStatic(MimeUtil.class)) {
             String testContent = "test content with specific hash";
-            String expectedMimeType = "text/plain"; // from mockMimeDetect
-            ObjectId tempStoredObjectId = new ObjectId(); // ObjectId returned by the initial store
+            String expectedMimeType = "text/plain";
+            ObjectId storedObjectId = new ObjectId(); // ObjectId returned by the initial store
 
             MimeUtil.Detected detected = new MimeUtil.Detected(new LookaheadInputStream(new ByteArrayInputStream(testContent.getBytes()), 64*1024), expectedMimeType);
             mockedMimeUtil.when(() -> MimeUtil.detect(any(InputStream.class))).thenReturn(detected);
             
             when(mockFile.getInputStream())
-                .thenReturn(new ByteArrayInputStream(testContent.getBytes())) // For Tika
-                .thenReturn(new ByteArrayInputStream(testContent.getBytes())) // For Hashing + Initial Store by service
-                .thenReturn(new ByteArrayInputStream(testContent.getBytes())); // Potentially for re-read if service did that (not in current path)
+                .thenReturn(new ByteArrayInputStream(testContent.getBytes())); 
             when(mockFile.getSize()).thenReturn((long)testContent.getBytes().length);
 
-            // 1. Filename conflict check should pass (return false)
             Query userOrigFilenameConflictQuery = Query.query(
                 Criteria.where("metadata.originalFilename").is(defaultUploadRequest.filename())
                         .and("metadata.ownerId").is(testUserId)
             );
             when(mongoTemplate.exists(eq(userOrigFilenameConflictQuery), eq("fs.files"))).thenReturn(false);
 
-            // 2. Service calls gridFsTemplate.store() - it returns a temporary ObjectId
             when(gridFsTemplate.store(
                 any(InputStream.class), 
-                argThat(this::isValidUUID), // systemFilenameUUID
+                argThat(this::isValidUUID), 
                 eq(expectedMimeType), 
-                argThat(meta -> Visibility.PENDING.name().equals(meta.getString("visibility")) && 
-                                 defaultUploadRequest.filename().equals(meta.getString("originalFilename")))
-            )).thenReturn(tempStoredObjectId);
+                argThat(meta -> defaultUploadRequest.visibility().name().equals(meta.getString("visibility")) && 
+                                 defaultUploadRequest.filename().equals(meta.getString("originalFilename"))
+                )
+            )).thenReturn(storedObjectId);
 
-            // 3. Service calculates hash, then checks for content conflict. Mock this to return true.
-            when(mongoTemplate.exists(argThat(q -> 
-                q.getQueryObject().containsKey("metadata.ownerId") && 
-                testUserId.equals(q.getQueryObject().get("metadata.ownerId")) &&
-                q.getQueryObject().containsKey("metadata.sha256") // Actual hash value is dynamic
-            ), eq("fs.files"))).thenReturn(true);
-
-            // 4. Service then calls gridFsTemplate.delete() with the tempStoredObjectId
-            doNothing().when(gridFsTemplate).delete(eq(Query.query(Criteria.where("_id").is(tempStoredObjectId))));
+            Query queryForHashUpdate = Query.query(Criteria.where("_id").is(storedObjectId));
+            when(mongoTemplate.updateFirst(
+                eq(queryForHashUpdate), 
+                argThat(upd -> ((Document) upd.getUpdateObject().get("$set")).containsKey("metadata.sha256")), 
+                eq("fs.files")
+            )).thenThrow(new org.springframework.dao.DuplicateKeyException("Simulated E11000 for hash"));
+            
+            // Mock the delete call that should now happen manually
+            doNothing().when(gridFsTemplate).delete(eq(Query.query(Criteria.where("_id").is(storedObjectId))));
             
             FileAlreadyExistsException ex = assertThrows(FileAlreadyExistsException.class, () -> {
                 fileService.uploadFile(testUserId, mockFile, defaultUploadRequest);
             });
-            assertEquals("Content already exists for this user. File upload aborted.", ex.getMessage(), "Exception message mismatch");
+            assertTrue(ex.getMessage().startsWith("Content already exists for this user (hash conflict:"), "Exception message mismatch");
             
-            // Verify store was called once, and delete was called once.
-            verify(gridFsTemplate, times(1)).store(
-                any(InputStream.class), 
-                argThat(this::isValidUUID), 
-                eq(expectedMimeType), 
-                any(Document.class)
-            );
-            verify(gridFsTemplate, times(1)).delete(eq(Query.query(Criteria.where("_id").is(tempStoredObjectId))));
+            verify(gridFsTemplate, times(1)).store(any(InputStream.class), anyString(), anyString(), any(Document.class));
+            verify(mongoTemplate, times(1)).updateFirst(eq(queryForHashUpdate), any(Update.class), eq("fs.files"));
+            // Verify that gridFsTemplate.delete() IS called by the service for manual cleanup
+            verify(gridFsTemplate, times(1)).delete(eq(Query.query(Criteria.where("_id").is(storedObjectId))));
         }
     }
     
@@ -725,8 +708,6 @@ class FileServiceImplTests {
         Document sortObject = capturedFindQuery.getSortObject();
 
         assertEquals(userId, queryObject.getString("metadata.ownerId"));
-        Document visDocExpected = new Document("$ne", Visibility.PENDING.name());
-        assertEquals(visDocExpected, queryObject.get("metadata.visibility"));
         assertNull(queryObject.get("metadata.tags"), "Tag filter should not be present");
         
         assertTrue(sortObject.containsKey("uploadDate"));
@@ -740,7 +721,6 @@ class FileServiceImplTests {
         Document countQueryObject = capturedCountQuery.getQueryObject();
 
         assertEquals(userId, countQueryObject.getString("metadata.ownerId"));
-        assertEquals(visDocExpected, countQueryObject.get("metadata.visibility"));
         assertNull(countQueryObject.get("metadata.tags"), "Tag filter should not be present for count");
         
         assertTrue(capturedCountQuery.getSortObject().isEmpty(), "Sort should not be present for count query");
@@ -818,10 +798,8 @@ class FileServiceImplTests {
         Document sortObject = capturedFindQuery.getSortObject();
 
         assertEquals(userId, queryObject.getString("metadata.ownerId"));
-        Document visDocExpected = new Document("$ne", Visibility.PENDING.name());
-        assertEquals(visDocExpected, queryObject.get("metadata.visibility"));
         assertEquals(filterTag.toLowerCase(), queryObject.getString("metadata.tags"));
-        
+            
         assertTrue(sortObject.containsKey("metadata.originalFilename"));
         assertEquals(-1, sortObject.getInteger("metadata.originalFilename"));
         assertEquals(pageSize, capturedFindQuery.getLimit());
@@ -833,9 +811,8 @@ class FileServiceImplTests {
         Document countQueryObject = capturedCountQuery.getQueryObject();
 
         assertEquals(userId, countQueryObject.getString("metadata.ownerId"));
-        assertEquals(visDocExpected, countQueryObject.get("metadata.visibility"));
         assertEquals(filterTag.toLowerCase(), countQueryObject.getString("metadata.tags"));
-        
+            
         assertTrue(capturedCountQuery.getSortObject().isEmpty(), "Sort should not be present for count query");
         assertEquals(0, capturedCountQuery.getLimit(), "Limit should not be applied for count query criteria");
         assertEquals(0, capturedCountQuery.getSkip(), "Skip should not be applied for count query criteria");

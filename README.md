@@ -292,3 +292,32 @@ Key functional indexes include those on:
 *   `metadata.token` (for unique download links).
 *   `metadata.visibility` and `metadata.tags` (for filtering and listing).
 *   A unique index on `(metadata.ownerId, metadata.originalFilename)` is also recommended for robust user-provided filename uniqueness but is not currently enforced at the DB level by default annotations. 
+
+## MongoDB Replica Set Requirement for Transactions
+
+This application requires MongoDB to be running as a replica set (even if single-node) in order to support transactions (required for safe file uploads and duplicate prevention). If you are running MongoDB via Docker Compose, ensure your service uses the following:
+
+```
+services:
+  mongo:
+    image: mongo:8.0
+    container_name: storage-app-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+
+volumes:
+  mongo-data:
+```
+
+And create a file named `init-mongo.js` in your project root with the following contents:
+
+```
+// init-mongo.js
+rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]});
+```
+
+This will ensure the replica set is initialized on first startup. The application will not work correctly with a standalone (non-replica set) MongoDB instance. 

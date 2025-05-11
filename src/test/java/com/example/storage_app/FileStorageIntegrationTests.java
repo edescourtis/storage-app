@@ -157,7 +157,6 @@ public class FileStorageIntegrationTests {
         Query filesQuery = Query.query(
             Criteria.where("metadata.originalFilename").is(commonFilename)
                     .and("metadata.ownerId").is(testUserId)
-                    .and("metadata.visibility").ne(Visibility.PENDING.name())
         );
         long count = mongoTemplate.count(filesQuery, "fs.files");
         assertEquals(1, count, "Should only be one file with the conflicting originalFilename in DB for this user");
@@ -193,7 +192,7 @@ public class FileStorageIntegrationTests {
                         .header("X-User-Id", testUserId)
                         .accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isConflict()) // Expect 409 Conflict
-                .andExpect(jsonPath("$.message").value("Content already exists for this user. File upload aborted."));
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("Content already exists for this user (hash conflict")));
         
         // Verify DB: only the first file should exist for this user with this content hash (implicitly)
         // Check that fileId1_systemUUID still exists by its system UUID (stored in filename field)
@@ -474,10 +473,10 @@ public class FileStorageIntegrationTests {
             } else if (result.getResponse().getStatus() == org.springframework.http.HttpStatus.CONFLICT.value()) {
                 conflictCount.incrementAndGet();
                 String responseContent = result.getResponse().getContentAsString();
-                // The service now throws "Filename '...' already exists for this user (DB conflict)." from the catch block for store
-                String expectedMessageSubstring = "Filename '" + commonFilename + "' already exists for this user (DB conflict).";
-                assertTrue(responseContent.contains(expectedMessageSubstring),
-                    "Conflict message should contain '" + expectedMessageSubstring + "', was: " + responseContent);
+                String expectedMessageSubstring1 = "Filename '" + commonFilename + "' already exists for this user."; // From pre-check
+                String expectedMessageSubstring2 = "Filename '" + commonFilename + "' already exists for this user (DB conflict during store)."; // From DKE on store
+                assertTrue(responseContent.contains(expectedMessageSubstring1) || responseContent.contains(expectedMessageSubstring2),
+                    "Conflict message for filename should contain '" + expectedMessageSubstring1 + "' or '" + expectedMessageSubstring2 + "'. Was: " + responseContent);
             } else {
                 otherErrorCount.incrementAndGet();
                 System.err.println("Parallel test got unexpected status: " + result.getResponse().getStatus() + " with body: " + result.getResponse().getContentAsString());
@@ -494,7 +493,7 @@ public class FileStorageIntegrationTests {
         Query filesQuery = Query.query(
             Criteria.where("metadata.originalFilename").is(commonFilename)
                     .and("metadata.ownerId").is(userId)
-                    .and("metadata.visibility").ne(Visibility.PENDING.name())
+                    // .and("metadata.visibility").ne(Visibility.PENDING.name()) // PENDING no longer exists
         );
         long dbCount = mongoTemplate.count(filesQuery, "fs.files");
         assertEquals(1, dbCount, "Only one file with that originalFilename should be in the DB for the user eventually.");
@@ -538,11 +537,10 @@ public class FileStorageIntegrationTests {
             } else if (result.getResponse().getStatus() == org.springframework.http.HttpStatus.CONFLICT.value()) {
                 conflictCount.incrementAndGet();
                 String responseContent = result.getResponse().getContentAsString();
-                // Expect either the early DKE on (ownerId, null sha256) during store OR a later content hash conflict message
-                boolean messageOk = responseContent.contains("A file with similar unique properties already exists (DB conflict).") || 
-                                  responseContent.contains("Content already exists for this user. File upload aborted.") ||
-                                  responseContent.contains("Content already exists for this user (DB conflict on finalization).");
-                assertTrue(messageOk, "Conflict message was not one of the expected for content conflict. Was: " + responseContent);
+                String expectedMsgHashConflict = "Content already exists for this user (hash conflict"; // From update stage DKE
+                String expectedMsgStoreConflict = "Content already exists for this user (DB conflict during store)"; // From store stage DKE (if (ownerId, null sha256) conflicts via non-sparse index)
+                assertTrue(responseContent.contains(expectedMsgHashConflict) || responseContent.contains(expectedMsgStoreConflict),
+                    "Conflict message for content should contain '" + expectedMsgHashConflict + "' or '" + expectedMsgStoreConflict + "'. Was: " + responseContent);
             } else {
                 otherErrorCount.incrementAndGet();
             }
@@ -563,7 +561,7 @@ public class FileStorageIntegrationTests {
                 Query findBySystemUUIDQuery = Query.query(
                     Criteria.where("filename").is(fileId_systemUUID)
                             .and("metadata.ownerId").is(userId)
-                            .and("metadata.visibility").ne(Visibility.PENDING.name())
+                            // .and("metadata.visibility").ne(Visibility.PENDING.name()) // PENDING no longer exists
                 );
                 Document fileDoc = mongoTemplate.findOne(findBySystemUUIDQuery, Document.class, "fs.files");
                 if (fileDoc != null) {
@@ -577,7 +575,7 @@ public class FileStorageIntegrationTests {
                 }
             }
             if (firstHash != null) {
-                 Query hashQuery = Query.query(Criteria.where("metadata.ownerId").is(userId).and("metadata.sha256").is(firstHash).and("metadata.visibility").ne(Visibility.PENDING));
+                 Query hashQuery = Query.query(Criteria.where("metadata.ownerId").is(userId).and("metadata.sha256").is(firstHash)); // Removed PENDING check
                  filesWithThisContentHash = (int) mongoTemplate.count(hashQuery, "fs.files");
                  assertEquals(1, filesWithThisContentHash, "Only one file entry should ultimately exist for this content hash and user.");
             } else if (successCount.get() == 0) { // If no success, all must have conflicted correctly

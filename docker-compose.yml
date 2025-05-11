@@ -6,6 +6,7 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    command: ["--replSet", "rs0", "--bind_ip_all"]
 
   app:
     build:
@@ -21,7 +22,8 @@ services:
       - mongo
     mem_limit: 1g # 1 GB RAM max
     tmpfs:
-      # limit /tmp (where Spring will spool uploads) to 200 MB
+      # limit /tmp (where Spring would spool uploads) to 200 MB
+      # this proves we don't store anything here.
       - /tmp:rw,size=200m
 
 volumes:

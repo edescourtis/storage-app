@@ -6,13 +6,10 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Date;
-import java.util.EnumSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -35,6 +32,7 @@ import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
 import org.springframework.data.mongodb.gridfs.GridFsTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -58,9 +56,6 @@ public class FileServiceImpl implements FileService {
     public static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
     public final int MAX_TAGS = 5;
     public final String HASH_ALGO = "SHA-256";
-    public final Set<Visibility> USER_ALLOWED_VISIBILITIES = Collections.unmodifiableSet(
-            EnumSet.of(Visibility.PUBLIC, Visibility.PRIVATE)
-    );
 
 
     @Autowired
@@ -70,12 +65,9 @@ public class FileServiceImpl implements FileService {
     private MongoTemplate mongoTemplate;
 
     @Override
+    @Transactional(rollbackFor = {IOException.class, NoSuchAlgorithmException.class, StorageException.class, FileAlreadyExistsException.class, IllegalArgumentException.class})
     public FileResponse uploadFile(String userId, MultipartFile file, FileUploadRequest request) throws NoSuchAlgorithmException, IOException {
         Visibility visibility = request.visibility();
-
-        if(!USER_ALLOWED_VISIBILITIES.contains(visibility)) {
-            throw new InvalidRequestArgumentException("Invalid visibility choices are " + USER_ALLOWED_VISIBILITIES);
-        }
 
         String userProvidedFilename = request.filename();
         if (userProvidedFilename == null || userProvidedFilename.isBlank()) {
@@ -84,6 +76,14 @@ public class FileServiceImpl implements FileService {
 
         if (userProvidedFilename == null || userProvidedFilename.isBlank()) {
             throw new InvalidRequestArgumentException("Filename cannot be empty.");
+        }
+
+        Query filenameConflictQuery = new Query(
+                Criteria.where("metadata.originalFilename").is(userProvidedFilename)
+                        .and("metadata.ownerId").is(userId)
+        );
+        if (mongoTemplate.exists(filenameConflictQuery, "fs.files")) {
+            throw new FileAlreadyExistsException("Filename '" + userProvidedFilename + "' already exists for this user.");
         }
 
         String systemFilenameUUID = UUID.randomUUID().toString();
@@ -100,8 +100,8 @@ public class FileServiceImpl implements FileService {
             throw new InvalidRequestArgumentException("File is empty");
         }
 
-        MimeUtil.Detected detected = MimeUtil.detect(file.getInputStream());
-        String mimeType = detected.contentType;
+        MimeUtil.Detected detectedMime = MimeUtil.detect(file.getInputStream());
+        String mimeType = detectedMime.contentType;
         if(mimeType == null && file.getContentType() != null && MediaType.parse(file.getContentType()) != null) {
             mimeType = file.getContentType();
         }
@@ -111,87 +111,66 @@ public class FileServiceImpl implements FileService {
 
         MessageDigest md = MessageDigest.getInstance(HASH_ALGO);
         String token = UUID.randomUUID().toString();
+        ObjectId storedFileObjectId;
 
-
-        try (InputStream actualStream = detected.stream;
+        try (InputStream actualStream = detectedMime.stream;
              DigestInputStream digestIn = new DigestInputStream(actualStream, md)) {
-
-            Query filenameConflictQuery = new Query(
-                    Criteria.where("metadata.originalFilename").is(userProvidedFilename)
-                            .and("metadata.ownerId").is(userId)
-            );
-            if (mongoTemplate.exists(filenameConflictQuery, "fs.files")) {
-                throw new FileAlreadyExistsException("Filename '" + userProvidedFilename + "' already exists for this user.");
-            }
             
             Document initialMetadata = new Document()
                     .append("ownerId", userId)
-                    .append("visibility", Visibility.PENDING.name())
+                    .append("visibility", visibility.name())
                     .append("tags", lowercaseTags)
                     .append("token", token)
                     .append("originalFilename", userProvidedFilename)
                     .append("uploadDate", new Date())
                     .append("contentType", mimeType)
                     .append("size", file.getSize());
-            ObjectId tempStoredObjectId = null;
-            String objectIdHex;
+            
             try {
-                tempStoredObjectId = gridFs.store(digestIn, systemFilenameUUID, mimeType, initialMetadata);
-                if (tempStoredObjectId == null) {
-                    throw new StorageException("Failed to store file.");
+                storedFileObjectId = gridFs.store(digestIn, systemFilenameUUID, mimeType, initialMetadata);
+                if (storedFileObjectId == null) { 
+                    throw new StorageException("Failed to store file, GridFS store operation returned null ID.");
                 }
-                objectIdHex = tempStoredObjectId.toHexString();
-            } catch (DuplicateKeyException e) {
-                if (e.getMessage() != null && e.getMessage().contains("metadata.originalFilename")) {
-                    logger.debug("Duplicated filename: {}, user: {}, systemUUID: {}. Msg: {}",
-                        userProvidedFilename, userId, systemFilenameUUID, e.getMessage());
-                    throw new FileAlreadyExistsException("Filename '" + userProvidedFilename + "' already exists for this user.");
-                } else {
-                    logger.error("MongoDB DuplicateKeyException during initial GridFS store for filename: {}. Exception: {}",
-                            userProvidedFilename, e.getMessage(), e);
-                    throw new StorageException("Failed to store file. (duplicate attribute)");
+            } catch (Exception e) { 
+                if (e instanceof DuplicateKeyException || (e instanceof MongoWriteException && ((MongoWriteException) e).getError().getCode() == 11000)) {
+                    String errorMessage = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                    logger.error("MongoDB DuplicateKeyException or E11000 WriteException during GridFS store for systemFilenameUUID: {}. Message: {}",
+                                systemFilenameUUID, e.getMessage(), e);
+                    if (errorMessage.contains("metadata.originalfilename")) {
+                        throw new FileAlreadyExistsException("Filename '" + userProvidedFilename + "' already exists for this user (DB conflict during store).", e);
+                    } else if (errorMessage.contains("metadata.sha256")) { 
+                        throw new FileAlreadyExistsException("Content already exists for this user (DB conflict during store).", e);
+                    }
+                    throw new StorageException("Failed to store file due to a data conflict during initial storage (GridFS store).", e);
+                } else if (e instanceof IOException) { 
+                    throw (IOException)e;
+                } else if (e instanceof NoSuchAlgorithmException) { 
+                    throw (NoSuchAlgorithmException)e;
                 }
-            } catch (MongoWriteException e) {
-                if (e.getError().getCode() == 11000 && e.getError().getMessage().contains("metadata.originalFilename")) {
-                    logger.debug("Duplicated filename: {}, user: {}, systemUUID: {}. Msg: {}",
-                            userProvidedFilename, userId, systemFilenameUUID, e.getMessage());
-                    throw new FileAlreadyExistsException("Filename '" + userProvidedFilename + "' already exists for this user.");
-                }
-                logger.error("MongoDB Write Exception during initial GridFS store for filename: {}. Code: {}. Exception: {}",
-                        userProvidedFilename, e.getError().getCode(), e.getError().getMessage(), e);
-                throw new StorageException("Failed to store file (write failed): " + e.getError().getMessage(), e);
+                logger.error("Unexpected exception during GridFS store for systemFilenameUUID: {}. Exception: {}", systemFilenameUUID, e.getMessage(), e);
+                throw new StorageException("Failed to store file due to an unexpected issue during initial storage.", e);
             }
 
             String hash = HexFormat.of().formatHex(digestIn.getMessageDigest().digest());
-            Query contentQuery = new Query(
-                    Criteria.where("metadata.ownerId").is(userId)
-                            .and("metadata.sha256").is(hash)
-            );
-            if (mongoTemplate.exists(contentQuery, "fs.files")) {
-                if (tempStoredObjectId != null) {
-                    gridFs.delete(new Query(Criteria.where("_id").is(tempStoredObjectId)));
-                }
-                throw new FileAlreadyExistsException("Content already exists for this user. File upload aborted.");
-            }
 
-            Query queryForUpdate = Query.query(Criteria.where("_id").is(new ObjectId(objectIdHex)));
-            Update update = new Update().set("metadata.sha256", hash).set("metadata.visibility", visibility.name());
+            Query queryForHashUpdate = Query.query(Criteria.where("_id").is(storedFileObjectId));
+            Update updateWithHash = new Update().set("metadata.sha256", hash);
+            
             try {
-                UpdateResult updateResult = mongoTemplate.updateFirst(queryForUpdate, update, "fs.files");
-                if (updateResult == null || updateResult.getModifiedCount() == 0) {
-                    if (tempStoredObjectId != null) {
-                         gridFs.delete(new Query(Criteria.where("_id").is(tempStoredObjectId))); 
-                    }
-                    logger.debug("Final metadata update modified 0 documents for systemId: {}. File might have been cleaned up by concurrent content conflict.", systemFilenameUUID);
-                    throw new FileAlreadyExistsException("File upload failed during finalization, possibly due to concurrent content conflict.");
+                UpdateResult updateResult = mongoTemplate.updateFirst(queryForHashUpdate, updateWithHash, "fs.files");
+                if (updateResult.getModifiedCount() == 0) {
+                    logger.warn("File metadata update for hash failed for ID: {}. Zero documents modified. Potential orphan if transaction doesn't roll back GridFS store.", storedFileObjectId);
+                    throw new StorageException("File metadata update for hash failed for ID: " + storedFileObjectId + ". Zero documents modified.");
                 }
-            } catch (DuplicateKeyException e) {
-                logger.warn("Duplicate key during final metadata update (likely content hash conflict) for systemId: {}, userProvidedFilename: {}. Exception: {}", 
-                    systemFilenameUUID, userProvidedFilename, e.getMessage());
-                if (tempStoredObjectId != null) {
-                    gridFs.delete(new Query(Criteria.where("_id").is(tempStoredObjectId)));
+            } catch (org.springframework.dao.DuplicateKeyException e) { 
+                logger.warn("Content duplicate detected for user {} (hash: {}) upon metadata update. SystemFileUUID: {}. Attempting to delete orphaned GridFS file.", userId, hash, systemFilenameUUID);
+                try {
+                    gridFs.delete(Query.query(Criteria.where("_id").is(storedFileObjectId)));
+                    logger.info("Successfully deleted orphaned GridFS file (id: {}) after hash conflict.", storedFileObjectId);
+                } catch (Exception deleteEx) {
+                    logger.error("Failed to delete orphaned GridFS file (id: {}) after hash conflict. Manual cleanup may be required.", storedFileObjectId, deleteEx);
                 }
-                throw new FileAlreadyExistsException("Content already exists for this user (DB conflict on finalization).");
+                throw new FileAlreadyExistsException("Content already exists for this user (hash conflict: " + e.getMessage() + ")", e);
             }
 
             String downloadLink = "/api/v1/files/download/" + token;
@@ -235,7 +214,7 @@ public class FileServiceImpl implements FileService {
 
         Criteria criteria = new Criteria();
         if (userId != null && !userId.isBlank()) {
-            criteria.and("metadata.ownerId").is(userId).and("metadata.visibility").ne(Visibility.PENDING.name());
+            criteria.and("metadata.ownerId").is(userId);
         } else {
             criteria.and("metadata.visibility").is(Visibility.PUBLIC.name());
         }
@@ -337,7 +316,6 @@ public class FileServiceImpl implements FileService {
         gridFs.delete(findBySystemUUIDQuery);
     }
 
-    // Helper method to map Document to FileResponse (will be created or confirmed if exists)
     private FileResponse mapDocToFileResponse(Document fsFileDoc) {
         if (fsFileDoc == null) return null;
         Document metadata = fsFileDoc.get("metadata", Document.class);
