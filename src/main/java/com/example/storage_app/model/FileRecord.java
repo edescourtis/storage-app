@@ -45,6 +45,7 @@ public class FileRecord {
   private Visibility visibility;
   private List<String> tags;
   private String sha256;
+  private String originalFilename;
 
   @Indexed(unique = true, name = "download_token_idx")
   private String token;
