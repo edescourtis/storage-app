@@ -36,6 +36,7 @@ import com.example.storage_app.exception.FileAlreadyExistsException;
 import com.example.storage_app.exception.InvalidRequestArgumentException;
 import com.example.storage_app.exception.ResourceNotFoundException;
 import com.example.storage_app.exception.StorageException;
+import com.example.storage_app.exception.UnauthorizedOperationException;
 import com.example.storage_app.model.Visibility;
 import com.example.storage_app.util.MimeUtil;
 import com.mongodb.client.gridfs.model.GridFSFile;
@@ -139,15 +140,16 @@ public class FileServiceImpl implements FileService {
 
     private String mapSortField(String apiSortField) {
         if (apiSortField == null) {
-            return "uploadDate"; // Default sort field if null is passed
+            return "uploadDate"; // Default sort field
         }
         return switch (apiSortField.toLowerCase()) {
             case "filename" -> "filename";
             case "uploaddate" -> "uploadDate";
             case "contenttype" -> "contentType";
             case "size" -> "length";
-            case "tag", "tags" -> "metadata.tags";
-            default -> "uploadDate";
+            case "tag", "tags" -> "metadata.tags"; // Sorting by tags might be complex/not ideal for performance
+            // default -> "uploadDate"; // Old default
+            default -> throw new IllegalArgumentException("Invalid sortBy field: " + apiSortField);
         };
     }
 
@@ -237,50 +239,73 @@ public class FileServiceImpl implements FileService {
         String newFilename = request.newFilename();
         ObjectId objectFileId = new ObjectId(fileId);
 
-        Query ownershipQuery = Query.query(
-            Criteria.where("_id").is(objectFileId)
-                    .and("metadata.ownerId").is(userId)
-        );
-        Document existingFileDoc = mongoTemplate.findOne(ownershipQuery, Document.class, "fs.files");
+        // 1. Find the file by ID first
+        Query findByIdQuery = Query.query(Criteria.where("_id").is(objectFileId));
+        Document existingFileDoc = mongoTemplate.findOne(findByIdQuery, Document.class, "fs.files");
 
         if (existingFileDoc == null) {
-            throw new ResourceNotFoundException("File not found with id: " + fileId + " for user: " + userId);
+            throw new ResourceNotFoundException("File not found with id: " + fileId);
         }
 
+        // 2. Check ownership
+        Document metadata = existingFileDoc.get("metadata", Document.class);
+        // Handle case where metadata might be null, though unlikely for GridFS files created by this service
+        if (metadata == null) {
+            throw new StorageException("File metadata is missing for fileId: " + fileId);
+        }
+        String ownerId = metadata.getString("ownerId");
+        if (!userId.equals(ownerId)) {
+            throw new UnauthorizedOperationException("User '" + userId + "' not authorized to update fileId: " + fileId);
+        }
+        
+        String currentFilename = existingFileDoc.getString("filename");
+        if (newFilename.equals(currentFilename)) {
+            Visibility visibility = Visibility.valueOf(metadata.getString("visibility")); 
+            List<String> tags = metadata.getList("tags", String.class, Collections.emptyList());
+            Date uploadDate = existingFileDoc.getDate("uploadDate"); 
+            String contentType = existingFileDoc.getString("contentType"); 
+            long size = existingFileDoc.getLong("length"); 
+            String token = metadata.getString("token");
+            String downloadLink = (token != null) ? "/api/v1/files/download/" + token : null; 
+
+            return new FileResponse(fileId, currentFilename, visibility, tags, uploadDate, contentType, size, downloadLink);
+        }
+
+        // 3. Check for filename conflict
         Query conflictQuery = Query.query(
             Criteria.where("filename").is(newFilename)
                     .and("metadata.ownerId").is(userId)
-                    .and("_id").ne(objectFileId) 
+            // No _id.ne needed, because if it was the same fileId and same newFilename,
+            // it would have been caught by the check above (newFilename.equals(currentFilename)).
+            // This query now correctly checks if *another* file by the same user has the newFilename.
         );
         if (mongoTemplate.exists(conflictQuery, "fs.files")) {
             throw new FileAlreadyExistsException("Filename '" + newFilename + "' already exists for this user.");
         }
 
-        Query updateQuery = Query.query(Criteria.where("_id").is(objectFileId));
+        // 4. Update Operation
+        Query updateQuery = Query.query(Criteria.where("_id").is(objectFileId)); 
         Update updateDefinition = new Update().set("filename", newFilename);
 
         UpdateResult updateResult = mongoTemplate.updateFirst(updateQuery, updateDefinition, "fs.files");
 
-        if (updateResult.getModifiedCount() == 0 && !existingFileDoc.getString("filename").equals(newFilename)) {
-            throw new StorageException("File update failed for fileId: " + fileId + ". The file was not modified.");
+        if (updateResult.getModifiedCount() == 0) {
+            // This implies the filename was different, checks passed, but still no update.
+            // Could be a concurrent modification or DB issue.
+            throw new StorageException("File update for filename failed for fileId: " + fileId + ". Zero documents modified despite expecting a change.");
         }
 
-        Document metadata = existingFileDoc.get("metadata", Document.class);
-        if (metadata == null) { // Should not happen if ownership query worked based on metadata.ownerId
-            throw new IllegalStateException("Metadata not found for file: " + fileId);
-        }
-        
-        String responseId = objectFileId.toHexString();
+        // 5. Construct and return FileResponse with the new filename
         Visibility visibility = Visibility.valueOf(metadata.getString("visibility")); 
-        List<String> tags = metadata.getList("tags", String.class);
+        List<String> tags = metadata.getList("tags", String.class, Collections.emptyList());
         Date uploadDate = existingFileDoc.getDate("uploadDate"); 
         String contentType = existingFileDoc.getString("contentType"); 
         long size = existingFileDoc.getLong("length"); 
         String token = metadata.getString("token");
-        String downloadLink = "/api/v1/files/download/" + token; 
+        String downloadLink = (token != null) ? "/api/v1/files/download/" + token : null; 
 
         return new FileResponse(
-                responseId,
+                fileId, 
                 newFilename, 
                 visibility,
                 tags,
@@ -294,17 +319,21 @@ public class FileServiceImpl implements FileService {
     @Override
     public void deleteFile(String userId, String fileId) {
         ObjectId objectFileId = new ObjectId(fileId);
+        Query findByIdQuery = Query.query(Criteria.where("_id").is(objectFileId));
+        
+        Document fileDoc = mongoTemplate.findOne(findByIdQuery, Document.class, "fs.files");
 
-        Query existenceAndOwnershipQuery = Query.query(
-            Criteria.where("_id").is(objectFileId)
-                    .and("metadata.ownerId").is(userId)
-        );
-
-        if (!mongoTemplate.exists(existenceAndOwnershipQuery, "fs.files")) {
-            throw new ResourceNotFoundException("File not found with id: " + fileId + " for user: " + userId + ", or user not authorized to delete.");
+        if (fileDoc == null) {
+            throw new ResourceNotFoundException("File not found with id: " + fileId);
         }
 
-        Query deleteQuery = Query.query(Criteria.where("_id").is(objectFileId));
-        gridFs.delete(deleteQuery);
+        Document metadata = fileDoc.get("metadata", Document.class);
+        String ownerId = (metadata != null) ? metadata.getString("ownerId") : null;
+
+        if (!userId.equals(ownerId)) {
+            throw new UnauthorizedOperationException("User '" + userId + "' not authorized to delete fileId: " + fileId + " owned by '" + ownerId + "'");
+        }
+
+        gridFs.delete(findByIdQuery); // Query by _id is sufficient as ownership is checked
     }
 } 

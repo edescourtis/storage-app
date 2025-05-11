@@ -64,7 +64,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Object> handleAllOtherExceptions(Exception ex, WebRequest request) {
-        return buildErrorResponse(ex, "An unexpected error occurred. Please try again later.", HttpStatus.INTERNAL_SERVER_ERROR, request);
+        // Log the exception for server-side review if a logger is integrated
+        // logger.error("Unhandled exception occurred: {} for request: {}", ex.getMessage(), request.getDescription(false), ex);
+        return buildErrorResponse(ex, ex.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR, request);
     }
 
     private ResponseEntity<Object> buildErrorResponse(Exception ex, HttpStatus status, WebRequest request) {
@@ -77,6 +79,7 @@ public class GlobalExceptionHandler {
         body.put("status", status.value());
         body.put("error", status.getReasonPhrase());
         body.put("message", message);
+        // body.put("path", request.getDescription(false).replace("uri=", "")); // Optional
         return new ResponseEntity<>(body, status);
     }
 } 

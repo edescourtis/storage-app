@@ -27,6 +27,7 @@ import org.springframework.web.multipart.MultipartFile;
 import com.example.storage_app.controller.dto.FileResponse;
 import com.example.storage_app.controller.dto.FileUpdateRequest;
 import com.example.storage_app.controller.dto.FileUploadRequest;
+import com.example.storage_app.exception.StorageException;
 import com.example.storage_app.service.FileService;
 
 import jakarta.validation.Valid;
@@ -74,7 +75,11 @@ public class FileController {
         HttpHeaders headers = new HttpHeaders();
         String contentType = resource.getContentType(); 
         headers.setContentType(contentType != null ? MediaType.parseMediaType(contentType) : MediaType.APPLICATION_OCTET_STREAM);
-        headers.setContentLength(resource.contentLength());
+        try {
+            headers.setContentLength(resource.contentLength()); 
+        } catch (IOException e) {
+            throw new StorageException("Error reading file content length: " + e.getMessage(), e);
+        }
         headers.setContentDispositionFormData("attachment", resource.getFilename()); 
 
         return ResponseEntity.ok()
