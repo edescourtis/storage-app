@@ -1,9 +1,8 @@
 package com.example.storage_app.controller.dto;
 
+import com.example.storage_app.model.Visibility;
 import java.util.Date;
 import java.util.List;
-
-import com.example.storage_app.model.Visibility;
 
 public record FileResponse(
     String id,
@@ -13,6 +12,4 @@ public record FileResponse(
     Date uploadDate,
     String contentType,
     long size,
-    String downloadLink
-) {
-} 
+    String downloadLink) {}

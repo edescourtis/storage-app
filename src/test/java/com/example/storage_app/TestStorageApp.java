@@ -7,5 +7,4 @@ public class TestStorageApp {
   public static void main(String[] args) {
     SpringApplication.from(StorageApp::main).with(TestcontainersConfiguration.class).run(args);
   }
-
 }

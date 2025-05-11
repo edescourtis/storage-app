@@ -11,15 +11,15 @@ import org.testcontainers.utility.DockerImageName;
 @TestConfiguration(proxyBeanMethods = false)
 class TestcontainersConfiguration {
 
-	private static final Logger log = LoggerFactory.getLogger(TestcontainersConfiguration.class);
+  private static final Logger log = LoggerFactory.getLogger(TestcontainersConfiguration.class);
 
-	@Bean
-	@ServiceConnection
-	MongoDBContainer mongoDbContainer() {
-		log.info("Configuring Testcontainers MongoDB with replica set rs0 command using mongo:8.0.");
-		MongoDBContainer container = new MongoDBContainer(DockerImageName.parse("mongo:8.0"))
-				.withCommand("--replSet", "rs0", "--bind_ip_all");
-		return container;
-	}
-
+  @Bean
+  @ServiceConnection
+  MongoDBContainer mongoDbContainer() {
+    log.info("Configuring Testcontainers MongoDB with replica set rs0 command using mongo:8.0.");
+    MongoDBContainer container =
+        new MongoDBContainer(DockerImageName.parse("mongo:8.0"))
+            .withCommand("--replSet", "rs0", "--bind_ip_all");
+    return container;
+  }
 }

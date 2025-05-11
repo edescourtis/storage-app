@@ -271,6 +271,21 @@ Or for non-validation errors (example for 404):
 
 ## Development Notes
 
+### Code Formatting
+
+This project uses Spotless with google-java-format to maintain consistent code style. 
+
+To format your code, run:
+```bash
+mvn spotless:apply
+```
+
+To check if the code is formatted correctly (e.g., in a CI pipeline), run:
+```bash
+mvn spotless:check
+```
+The build is configured to automatically run `spotless:check` during the `compile` phase. If formatting issues are found, the build will fail.
+
 ### MongoDB Indexes
 Efficient querying and uniqueness constraints in the application rely on several MongoDB indexes on the `fs.files` collection (used by GridFS).
 
