@@ -109,7 +109,7 @@ The STORAGE application provides a RESTful API for managing files.
     *   Body (`FileResponse`):
         ```json
         {
-          "id": "609c1f3e7f3b7c1b3e7f3b7c",
+          "id": "your-system-generated-file-uuid",
           "filename": "your-document.pdf",
           "visibility": "PRIVATE",
           "tags": ["important", "project-alpha"],
@@ -272,15 +272,23 @@ Or for non-validation errors (example for 404):
 ## Development Notes
 
 ### MongoDB Indexes
-The application relies on several MongoDB indexes on the `fs.files` collection for efficient querying and to enforce uniqueness constraints. These indexes are defined using `@Indexed` and `@CompoundIndex` annotations on the `com.example.storage_app.model.FileRecord` entity, and Spring Boot attempts to create them automatically.
+Efficient querying and uniqueness constraints in the application rely on several MongoDB indexes on the `fs.files` collection (used by GridFS).
 
-Upon application startup when connected to a MongoDB instance, you should see logs from `org.springframework.data.mongodb.core.index.MongoPersistentEntityIndexCreator` indicating index creation activity.
+**Understanding Index Creation:**
+*   The `FileRecord.java` entity is mapped to `fs.files` and contains `@Indexed` and `@CompoundIndex` annotations. If `spring.data.mongodb.auto-index-creation` is enabled (default is true), Spring Boot will attempt to create indexes based on these annotations.
+*   **Important Note:** `FileServiceImpl` stores custom attributes (like `ownerId`, `sha256`, `token`, `originalFilename`, `tags`, `visibility`) in a `metadata` sub-document within `fs.files`. However, the `FileRecord.java` entity currently defines corresponding fields at its root level. This means Spring's automatic index creation based *solely* on `FileRecord`'s root-level annotations will **not** correctly create indexes on the crucial `metadata.*` paths.
+*   Therefore, ensuring the correct `metadata.*` indexes (as detailed in `CONSIDERATIONS.md`, Point 13) may require programmatic setup (like `MongoTestIndexConfiguration` used for tests) or manual creation in a production environment. Indexes on top-level GridFS fields (e.g., `uploadDate`, `length`, `filename` (system UUID)) might be created automatically via `FileRecord` annotations.
 
-You can manually verify the indexes by connecting to your MongoDB instance using `mongoSH` and running:
+**Verification:**
+Upon application startup with a MongoDB connection, you might see logs from `org.springframework.data.mongodb.core.index.MongoPersistentEntityIndexCreator`. However, due to the considerations above, manual verification is highly recommended:
 ```shell
 use storage-db # Or your configured database name
 db.fs.files.getIndexes()
 ```
-Ensure the indexes listed in `CONSIDERATIONS.md` (Section 13) or implied by `FileRecord.java` annotations are present for optimal performance.
+**Refer to `CONSIDERATIONS.md` (Section 13) for a detailed list of required indexes and their correct paths (e.g., `metadata.ownerId`, `metadata.sha256`, `metadata.token`, etc.) to ensure optimal performance and correct constraint enforcement.**
 
-Key indexes include those on `metadata.ownerId` combined with `filename` or `metadata.sha256`, `metadata.token`, `metadata.visibility`, and `metadata.tags`. 
+Key functional indexes include those on:
+*   `metadata.ownerId` combined with `metadata.sha256` (for content uniqueness per user).
+*   `metadata.token` (for unique download links).
+*   `metadata.visibility` and `metadata.tags` (for filtering and listing).
+*   A unique index on `(metadata.ownerId, metadata.originalFilename)` is also recommended for robust user-provided filename uniqueness but is not currently enforced at the DB level by default annotations. 

@@ -37,7 +37,7 @@ public class FileRecord {
     @Indexed
     private String contentType;
 
-    @Field("length") 
+    @Field("length")
     @Indexed 
     private long size; 
 

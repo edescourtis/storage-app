@@ -35,18 +35,16 @@ This document records key technical considerations, potential challenges, and de
     *   The requirement "tag should be selected from the list (no tag guessing)" for filtering implies that the frontend would somehow know available tags. However, the backend is not required to provide a list of all tags. For API-only, filtering will be by user-provided tag strings.
 
 ## 6. Duplicate File Prevention (Per User)
-*   **Requirement**: Prevent a user from uploading the same file twice based on content OR filename.
-*   **Logic**: For a given `userId`:
-    *   `EXISTS (file WHERE metadata.ownerId = userId AND metadata.sha256 = newFile.sha256)`
-    *   `OR`
-    *   `EXISTS (file WHERE metadata.ownerId = userId AND metadata.originalFilename = newFile.filename)`
-*   **Implementation**: This requires a query with an `$or` condition on `metadata.sha256` and `metadata.originalFilename`, combined with an `$and` for `metadata.ownerId`.
+*   **Requirement**: Prevent a user from uploading the same file twice based on content OR user-provided filename.
+*   **Logic & Implementation**: The `FileServiceImpl#uploadFile` method implements this in a sequence:
+    1.  **Filename Check**: Before any data is stored in GridFS, it checks if a file with the same `metadata.originalFilename` already exists for the given `metadata.ownerId`. If so, the upload is rejected. This check is performed via an explicit `mongoTemplate.exists()` query.
+    2.  **Content Check**: If the filename check passes, the file content is streamed to GridFS (calculating its SHA-256 hash concurrently). After successful storage (initially with `PENDING` visibility), it checks if another file with the same `metadata.sha256` already exists for the `metadata.ownerId`. If a content duplicate is found, the just-stored GridFS file is deleted, and the upload is rejected. This is also an explicit `mongoTemplate.exists()` query, followed by an update that sets the final `metadata.sha256` and `metadata.visibility`, which is itself protected by a unique compound index `(metadata.ownerId, metadata.sha256)`.
 
 ## 7. File Type Detection
 *   **Requirement**: Identify file type after upload if not provided by user.
-*   **Tool**: Apache Tika is already included in `pom.xml`.
-*   **Process**: After the file is stored in GridFS, its content (or an initial chunk) can be streamed to Tika for detection. The detected MIME type will be stored in `metadata.contentType`.
-*   **Timing**: This can be an asynchronous operation or done immediately after upload. For simplicity, synchronous detection after GridFS storage seems appropriate for now.
+*   **Tool**: Apache Tika via `MimeUtil.java`.
+*   **Process**: During the upload process, before the file is committed to GridFS, the `FileServiceImpl` uses `MimeUtil.detect()`. This utility wraps the incoming `InputStream` in a Tika `LookaheadInputStream`, performs the detection using a small prefix of the stream, and then resets the `LookaheadInputStream`. The full, reset stream (now containing the detected MIME type) is then used for SHA-256 calculation and storage in GridFS. The detected MIME type is stored in `metadata.contentType`.
+*   **Timing**: Detection is synchronous and occurs during the upload stream processing, prior to GridFS storage.
 
 ## 8. Error Handling
 *   **Strategy**: Use a global exception handler (`@ControllerAdvice`) to map custom exceptions (e.g., `FileNotFoundException`, `FileAlreadyExistsException`, `UnauthorizedOperationException`) to appropriate HTTP status codes and consistent JSON error responses.
@@ -63,27 +61,41 @@ This document records key technical considerations, potential challenges, and de
 *   **Implementation**: Utilize Spring Data MongoDB's `Pageable` and `Sort` objects in repository/`MongoTemplate` queries. Sorting will target fields within `metadata`.
 
 ## 12. Database Transactions
-*   **Consideration**: For operations involving multiple steps (e.g., storing file in GridFS, then saving/updating metadata document), transactional consistency might be desired.
-*   **MongoDB**: Multi-document transactions are supported. For GridFS, storing the file and its metadata is typically an atomic operation via the driver if done correctly. If we maintain separate metadata outside GridFS file object, we'd need transactions for creating/updating that.
-*   **Decision**: Initially, rely on `GridFsTemplate` to handle atomicity of file + its own metadata. If we create a separate `FileMetadata` collection, we'll need to ensure operations are effectively atomic or idempotent.
-    *   **Update**: The `FileMetadata` object will *be* the metadata for the `GridFSFile`. Spring Data MongoDB will handle mapping this POJO to the `metadata` document of the `GridFSFile` when using `GridFsTemplate.store(...)`.
+*   **Consideration**: For operations involving multiple steps (e.g., checking filename, storing file in GridFS, then calculating hash and updating metadata), transactional consistency is desirable.
+*   **MongoDB**: Multi-document transactions are supported.
+*   **Decision & Current Implementation**:
+    *   The `GridFsTemplate.store()` operation is atomic for storing a file's content and its associated initial metadata document.
+    *   The broader `uploadFile` business logic in `FileServiceImpl` (which includes pre-checks, the GridFS store, post-store content hash check, and final metadata update) is **not currently wrapped in an explicit Spring-managed transaction (`@Transactional`)**.
+    *   Instead, a multi-step process is used:
+        1.  Pre-check for filename conflicts.
+        2.  Store file in GridFS with `PENDING` visibility and initial metadata (excluding final SHA256). The metadata is constructed as an `org.bson.Document` directly, not via a mapped `FileMetadata` POJO passed to the `store` method.
+        3.  Post-store check for content hash conflicts.
+        4.  If all checks pass, update the GridFS file's metadata to set the final visibility and SHA256 hash.
+    *   Manual cleanup logic (deleting the GridFS file) is implemented if checks fail after the initial store. This approach relies on careful sequencing and error handling rather than ACID transactions for the overall operation.
 
 ## 13. MongoDB Indexing for `fs.files`
 *   **Requirement**: Efficient querying for listing, sorting, duplicate checks, and downloads by token.
-*   **Strategy**: Leverage Spring Data MongoDB's automatic index creation via `@Indexed` and `@CompoundIndex` annotations on the `FileRecord` class, which is mapped to the `fs.files` collection. `spring.data.mongodb.auto-index-creation=true` (default) must be enabled.
+*   **Strategy & Current State**:
+    *   The `FileRecord.java` class is annotated with `@Document("fs.files")` and includes `@Indexed` and `@CompoundIndex` annotations. However, `FileRecord` defines fields like `sha256`, `token`, `ownerId`, etc., at its root level, while the actual custom metadata is stored by `FileServiceImpl` in a `metadata` sub-document within `fs.files` (e.g., `metadata.sha256`, `metadata.token`).
+    *   Due to this misalignment, Spring Data MongoDB's automatic index creation based *solely* on `FileRecord`'s root-level field annotations will **not** correctly create indexes on the nested `metadata.*` paths for these fields.
+    *   Indexes on root-level GridFS fields (like `uploadDate`, `length`, `contentType`, and the top-level `filename` which stores the system UUID) might be created if `spring.data.mongodb.auto-index-creation=true` is active and these are annotated in `FileRecord`.
+    *   The crucial indexes on `metadata.*` paths (e.g., for content hash, download token, tags, visibility, ownerId) are likely being ensured by other means, such as the `MongoTestIndexConfiguration` for tests, or would require manual/programmatic setup in a production environment to guarantee their existence on the correct paths.
 *   **Verification**:
-    *   During application startup, observe logs for messages from `org.springframework.data.mongodb.core.index.MongoPersistentEntityIndexCreator` confirming index creation.
-    *   Optionally, manually verify using `db.fs.files.getIndexes()` in `mongoSH` against the development MongoDB instance.
-*   **Required Indexes (defined in `FileRecord.java` or to be added):**
-    *   `{ "metadata.ownerId": 1, "filename": 1 }` (unique, for user-specific filename check) - Field `filename` is root.
-    *   `{ "metadata.ownerId": 1, "metadata.sha256": 1 }` (unique, for user-specific content check)
-    *   `{ "metadata.token": 1 }` (unique, for downloads)
-    *   `{ "metadata.visibility": 1 }` (for listing public files)
-    *   `{ "metadata.tags": 1 }` (multikey, for filtering by tags)
-    *   `{ "uploadDate": 1 }` (root field, for sorting)
-    *   `{ "contentType": 1 }` (root field, for sorting)
-    *   `{ "length": 1 }` (root field, for sorting by size)
-    *   `{ "filename": 1 }` (root field, for sorting, often combined with ownerId)
+    *   Manual verification using `db.fs.files.getIndexes()` in `mongoSH` is the most reliable way to confirm actual indexes.
+*   **Key Indexes (Actual Paths Required):**
+    *   **For User-Provided Filename Uniqueness (MISSING):** `{'metadata.ownerId': 1, 'metadata.originalFilename': 1}` (unique). *Note: This index is not currently defined or enforced at the database level; filename uniqueness relies on an application-level check.*
+    *   **For Content Uniqueness:** `{'metadata.ownerId': 1, 'metadata.sha256': 1}` (unique). *The `FileRecord` annotation for this is on a root field, so the actual index must be ensured externally.*
+    *   **For Download by Token:** `{'metadata.token': 1}` (unique). *Same as above regarding `FileRecord` annotation.*
+    *   **For Listing/Filtering:**
+        *   `{'metadata.visibility': 1}`
+        *   `{'metadata.tags': 1}` (multikey)
+        *   `{'metadata.ownerId': 1}` (often as part of compound indexes)
+    *   **For Sorting (GridFS root fields):**
+        *   `{'uploadDate': 1}`
+        *   `{'contentType': 1}`
+        *   `{'length': 1}`
+        *   `{'filename': 1}` (system UUID, for some internal lookups or default sort if needed)
+*   **Recommendation:** Review and align `FileRecord.java` with the actual `metadata` sub-document structure if Spring Data's automatic index creation is the desired primary mechanism. Alternatively, explicitly document that `FileRecord` is not the source of truth for `metadata.*` index definitions and detail the actual index creation strategy. Add the missing unique index for `(metadata.ownerId, metadata.originalFilename)`.
 
 ## 14. Testing `@Valid @RequestBody` with `@WebMvcTest`
 *   **Observation**: During `MockMvc` testing of `FileController` using `@WebMvcTest`, DTO validation annotations (`@NotBlank`, etc.) on parameters annotated with `@Valid @RequestBody` (specifically for `PATCH /api/v1/files/{fileId}` with `FileUpdateRequest`) did not trigger a `MethodArgumentNotValidException` as expected. The controller method was entered, and the test failed because it received a 200 OK (from a null service response) instead of the expected 400 Bad Request.

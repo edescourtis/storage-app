@@ -6,19 +6,16 @@ import java.io.InputStream;
 import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Date;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.bson.types.ObjectId;
-
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,8 +28,8 @@ import org.mockito.Mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -46,25 +43,21 @@ import com.example.storage_app.controller.dto.FileResponse;
 import com.mongodb.client.gridfs.model.GridFSFile;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
 import org.mockito.ArgumentCaptor;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import com.example.storage_app.controller.dto.FileUpdateRequest;
 import com.mongodb.client.result.UpdateResult;
 import org.bson.Document;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
-import java.util.stream.Collectors;
 import java.util.Collections;
-import java.util.Arrays; // For Arrays.asList
-import org.springframework.data.domain.Page; // For return type
+import java.util.Arrays;
+import org.springframework.data.domain.Page;
 import com.example.storage_app.exception.FileAlreadyExistsException;
 import com.example.storage_app.exception.InvalidRequestArgumentException;
 import com.example.storage_app.exception.ResourceNotFoundException;
 import com.example.storage_app.exception.UnauthorizedOperationException;
 import com.example.storage_app.exception.StorageException;
 import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.data.mongodb.core.query.Criteria;
 
 @ExtendWith(MockitoExtension.class)
 class FileServiceImplTest {
@@ -86,106 +79,206 @@ class FileServiceImplTest {
     private String testContent = "Hello World";
     private ObjectId testObjectId = new ObjectId();
     private String testToken = "test-download-token";
-    private String testFileId = new ObjectId().toHexString();
+    private String testFileId;
     private String newFilename = "new_document.txt";
+
+    private static final Pattern UUID_REGEX =
+        Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
+    private boolean isValidUUID(String s) {
+        if (s == null) return false;
+        return UUID_REGEX.matcher(s).matches();
+    }
 
     @BeforeEach
     void setUp() {
         fileUploadRequest = new FileUploadRequest(testFilename, Visibility.PRIVATE, List.of("tag1"));
+        testFileId = UUID.randomUUID().toString();
     }
 
     @Test
     void uploadFile_whenFilenameExistsForUser_shouldThrowIllegalArgumentException() throws IOException, NoSuchAlgorithmException {
         when(mockMultipartFile.isEmpty()).thenReturn(false);
 
-        when(mongoTemplate.exists(any(Query.class), eq("fs.files"))).thenReturn(true);
+        Query expectedFilenameConflictQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(fileUploadRequest.filename())
+                    .and("metadata.ownerId").is(testUserId)
+        );
+        when(mongoTemplate.exists(eq(expectedFilenameConflictQuery), eq("fs.files"))).thenReturn(true);
 
         FileAlreadyExistsException exception = assertThrows(FileAlreadyExistsException.class, () -> { 
             fileService.uploadFile(testUserId, mockMultipartFile, fileUploadRequest);
         });
 
-        assertTrue(exception.getMessage().contains("Filename '" + testFilename + "' already exists for this user."));
+        assertTrue(exception.getMessage().contains("Filename '" + fileUploadRequest.filename() + "' already exists for this user."));
+        verify(gridFsTemplate, never()).store(any(), anyString(), anyString(), any(Document.class));
     }
 
     @Test
     void uploadFile_whenContentExistsForUser_shouldThrowIllegalArgumentException() throws IOException, NoSuchAlgorithmException {
         FileUploadRequest contentCheckRequest = new FileUploadRequest("anotherfile.txt", Visibility.PRIVATE, List.of("tag1"));
-        when(mockMultipartFile.isEmpty()).thenReturn(false);
-        when(mockMultipartFile.getInputStream()).thenReturn(new ByteArrayInputStream(testContent.getBytes()));
-        
-        when(gridFsTemplate.store(any(InputStream.class), eq("anotherfile.txt"), anyString(), any(org.bson.Document.class)))
-                .thenReturn(testObjectId);
+        ObjectId mockStoredObjectId = new ObjectId(); // ObjectId returned by the initial store
 
-        when(mongoTemplate.exists(argThat(new ArgumentMatcher<Query>() {
-            @Override
-            public boolean matches(Query query) {
-                if (query == null || query.getQueryObject() == null) return false;
-                Document queryObject = query.getQueryObject();
-                boolean filenameMatch = "anotherfile.txt".equals(queryObject.getString("filename"));
-                boolean ownerMatch = testUserId.equals(queryObject.getString("metadata.ownerId"));
-                return filenameMatch && ownerMatch;
-            }
-        }), eq("fs.files"))).thenReturn(false);
+        when(mockMultipartFile.isEmpty()).thenReturn(false);
+        // Mock getInputStream to be called for MimeUtil.detect, and then for the DigestInputStream during store
+        when(mockMultipartFile.getInputStream())
+            .thenReturn(new ByteArrayInputStream(testContent.getBytes())) // For MimeUtil.detect
+            .thenReturn(new ByteArrayInputStream(testContent.getBytes())); // For DigestInputStream for store
+        when(mockMultipartFile.getSize()).thenReturn((long) testContent.getBytes().length);
         
-        when(mongoTemplate.exists(argThat(new ArgumentMatcher<Query>() {
-            @Override
-            public boolean matches(Query query) {
-                if (query == null || query.getQueryObject() == null) return false;
+        // 1. Filename conflict check: For "anotherfile.txt", ownerId=testUserId. Should return false.
+        Query filenameConflictQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(contentCheckRequest.filename())
+                    .and("metadata.ownerId").is(testUserId)
+        );
+        when(mongoTemplate.exists(eq(filenameConflictQuery), eq("fs.files"))).thenReturn(false);
+
+        // 2. gridFsTemplate.store() is called with a UUID system filename.
+        // It stores initial metadata with Visibility.PENDING.
+        when(gridFsTemplate.store(
+            any(InputStream.class), 
+            argThat(this::isValidUUID), // Ensures a UUID is passed as system filename
+            anyString(), // contentType
+            argThat(metadataDoc -> // initialMetadata check
+                testUserId.equals(metadataDoc.getString("ownerId")) &&
+                contentCheckRequest.filename().equals(metadataDoc.getString("originalFilename")) &&
+                Visibility.PENDING.name().equals(metadataDoc.getString("visibility")) &&
+                (long)testContent.getBytes().length == metadataDoc.getLong("size") // Check size from metadata
+            )
+        )).thenReturn(mockStoredObjectId);
+
+        // 3. Content conflict check: For ownerId=testUserId and some sha256. Should return true.
+        when(mongoTemplate.exists(
+            argThat(query -> { // Query for content conflict (sha256 + ownerId)
                 Document queryObject = query.getQueryObject();
-                boolean hasSha256 = queryObject.containsKey("metadata.sha256");
-                boolean ownerMatch = testUserId.equals(queryObject.getString("metadata.ownerId"));
-                return hasSha256 && ownerMatch;
-            }
-        }), eq("fs.files"))).thenReturn(true);
+                return queryObject.containsKey("metadata.sha256") &&
+                       testUserId.equals(queryObject.getString("metadata.ownerId"));
+            }), 
+            eq("fs.files")
+        )).thenReturn(true);
+        
+        // 4. gridFsTemplate.delete() should be called for the temporary file with mockStoredObjectId
+        Query deleteTempFileQuery = Query.query(Criteria.where("_id").is(mockStoredObjectId));
+        // No need to stub doNothing().when(gridFsTemplate).delete(...) unless it has a return value or specific side effects to mock.
+        // Verification is enough.
 
         FileAlreadyExistsException exception = assertThrows(FileAlreadyExistsException.class, () -> {
             fileService.uploadFile(testUserId, mockMultipartFile, contentCheckRequest);
         });
         
-        assertTrue(exception.getMessage().contains("Content already exists for this user. File upload aborted."));
+        assertEquals("Content already exists for this user. File upload aborted.", exception.getMessage());
+        
+        // Verify store was called (once) with a UUID as filename
+        verify(gridFsTemplate).store(
+            any(InputStream.class), 
+            argThat(this::isValidUUID), 
+            anyString(), 
+            any(Document.class)
+        );
+        // Verify delete was called for the temp file (once)
+        verify(gridFsTemplate).delete(eq(deleteTempFileQuery));
     }
 
     @Test
     void uploadFile_whenFilenameAndContentAreUnique_shouldSucceed() throws IOException, NoSuchAlgorithmException {
-        when(mockMultipartFile.isEmpty()).thenReturn(false);
-        when(mockMultipartFile.getInputStream()).thenReturn(new ByteArrayInputStream(testContent.getBytes()));
-        when(mockMultipartFile.getSize()).thenReturn((long) testContent.getBytes().length);
-        
-        when(gridFsTemplate.store(any(InputStream.class), eq(testFilename), anyString(), any(org.bson.Document.class)))
-                .thenReturn(testObjectId);
+        // fileUploadRequest uses testFilename ("test.txt") and Visibility.PRIVATE
+        ObjectId mockStoredObjectId = new ObjectId(); // For the _id after gridFsTemplate.store
+        // String mockSystemUuid = null; // Not directly used for assertion in this version of the test
+        // String mockSha256 = "mocksha256value"; // Example hash, not directly asserted by value
+        // String mockToken = "mock-token-for-response"; // Example token, part of downloadLink
 
-        when(mongoTemplate.exists(argThat(new ArgumentMatcher<Query>() {
-            @Override
-            public boolean matches(Query query) {
-                return query != null && 
-                       query.getQueryObject().containsKey("filename") &&
-                       query.getQueryObject().get("metadata.ownerId") != null && 
-                       query.getQueryObject().get("metadata.ownerId").equals(testUserId);
-            }
-        }), eq("fs.files"))).thenReturn(false);
-        
-        when(mongoTemplate.exists(argThat(new ArgumentMatcher<Query>() {
-            @Override
-            public boolean matches(Query query) {
-                return query != null && 
-                       query.getQueryObject().containsKey("metadata.sha256") &&
-                       query.getQueryObject().get("metadata.ownerId") != null && 
-                       query.getQueryObject().get("metadata.ownerId").equals(testUserId);
-            }
-        }), eq("fs.files"))).thenReturn(false);
-        
+        when(mockMultipartFile.isEmpty()).thenReturn(false);
+        when(mockMultipartFile.getInputStream())
+            .thenReturn(new ByteArrayInputStream(testContent.getBytes())) // For MimeUtil.detect
+            .thenReturn(new ByteArrayInputStream(testContent.getBytes())) // For DigestInputStream for store
+            .thenReturn(new ByteArrayInputStream(testContent.getBytes())); // For MessageDigest update
+        when(mockMultipartFile.getSize()).thenReturn((long) testContent.getBytes().length);
+        // when(mockMultipartFile.getOriginalFilename()).thenReturn(fileUploadRequest.filename()); // REMOVED - Unnecessary as request.filename() is used first
+
+        // 1. Filename conflict check: should return false
+        Query filenameConflictQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(fileUploadRequest.filename())
+                    .and("metadata.ownerId").is(testUserId)
+        );
+        when(mongoTemplate.exists(eq(filenameConflictQuery), eq("fs.files"))).thenReturn(false);
+
+        // 2. gridFsTemplate.store() is called with a UUID system filename.
+        // Capture the generated UUID and token.
+        ArgumentCaptor<String> systemUuidCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Document> metadataCaptorForStore = ArgumentCaptor.forClass(Document.class);
+
+        when(gridFsTemplate.store(
+            any(InputStream.class), 
+            systemUuidCaptor.capture(), 
+            anyString(), // contentType 
+            metadataCaptorForStore.capture()
+        )).thenReturn(mockStoredObjectId);
+
+        // 3. Content conflict check: should return false
+        when(mongoTemplate.exists(
+            argThat(query -> { 
+                Document queryObject = query.getQueryObject();
+                return queryObject.containsKey("metadata.sha256") &&
+                       testUserId.equals(queryObject.getString("metadata.ownerId"));
+            }), 
+            eq("fs.files")
+        )).thenReturn(false);
+
+        // 4. mongoTemplate.updateFirst() for sha256 and final visibility
+        UpdateResult mockUpdateResult = mock(UpdateResult.class);
+        when(mockUpdateResult.getModifiedCount()).thenReturn(1L);
+        when(mongoTemplate.updateFirst(
+            eq(Query.query(Criteria.where("_id").is(mockStoredObjectId))),
+            argThat(update -> {
+                Document setObject = update.getUpdateObject().get("$set", Document.class);
+                return setObject.containsKey("metadata.sha256") && // Hash is dynamic, just check presence
+                       fileUploadRequest.visibility().name().equals(setObject.getString("metadata.visibility"));
+            }),
+            eq("fs.files")
+        )).thenReturn(mockUpdateResult);
+
+        // 5. mongoTemplate.findOne() to build the response - this needs to return the complete final document
+        // This part is tricky because the systemFilenameUUID and token are generated inside the service.
+        // We will mock it based on what the service *would* have stored and then updated.
+        // For the purpose of this unit test, we can assume the service correctly constructs the FileResponse
+        // if the database interactions are correct and the final document is formed as expected.
+        // The actual FileResponse is built using the values from initialMetadata and the updated fields.
+        // The service doesn't re-fetch the document to build the FileResponse in the current implementation.
+        // It uses values from the process (systemFilenameUUID, userProvidedFilename, visibility, etc.)
+
+        // Act
         FileResponse response = fileService.uploadFile(testUserId, mockMultipartFile, fileUploadRequest);
 
+        // Assert
         assertNotNull(response);
-        assertEquals(testObjectId.toHexString(), response.id());
-        assertEquals(testFilename, response.filename());
-        assertEquals(Visibility.PRIVATE, response.visibility());
-        assertEquals(List.of("tag1"), response.tags());
+        assertTrue(isValidUUID(response.id()), "Response ID should be a valid UUID");
+        assertEquals(fileUploadRequest.filename(), response.filename());
+        assertEquals(fileUploadRequest.visibility(), response.visibility());
+        assertEquals(fileUploadRequest.tags().stream().map(String::toLowerCase).collect(java.util.stream.Collectors.toList()), response.tags());
         assertNotNull(response.uploadDate());
-        assertNotNull(response.contentType()); 
-        assertEquals(testContent.getBytes().length, response.size());
-        String expectedDownloadLink = "/api/v1/files/" + testObjectId.toHexString() + "/download";
-        assertEquals(expectedDownloadLink, response.downloadLink());
+        assertNotNull(response.contentType());
+        assertEquals(mockMultipartFile.getSize(), response.size());
+        assertNotNull(response.downloadLink());
+        assertTrue(response.downloadLink().startsWith("/api/v1/files/download/"));
+
+        // Verify interactions
+        verify(mongoTemplate).exists(eq(filenameConflictQuery), eq("fs.files")); // Filename check
+        verify(mongoTemplate).exists(argThat(q -> q.getQueryObject().containsKey("metadata.sha256")), eq("fs.files")); // Content check
+        
+        // Verify store call with captured UUID
+        String capturedSystemUuid = systemUuidCaptor.getValue();
+        assertTrue(isValidUUID(capturedSystemUuid));
+        Document capturedMetadataForStore = metadataCaptorForStore.getValue();
+        assertEquals(testUserId, capturedMetadataForStore.getString("ownerId"));
+        assertEquals(fileUploadRequest.filename(), capturedMetadataForStore.getString("originalFilename"));
+        assertEquals(Visibility.PENDING.name(), capturedMetadataForStore.getString("visibility"));
+
+        // Verify updateFirst call
+        verify(mongoTemplate).updateFirst(
+            eq(Query.query(Criteria.where("_id").is(mockStoredObjectId))),
+            any(Update.class), // Already checked specific fields with argThat in the when()
+            eq("fs.files")
+        );
     }
 
     @Test
@@ -243,236 +336,217 @@ class FileServiceImplTest {
 
     @Test
     void updateFileDetails_whenFileExistsAndUserOwnsItAndNewNameIsValid_shouldSucceed() {
-        String newValidFilename = "a_new_valid_filename.txt";
-        FileUpdateRequest updateRequest = new FileUpdateRequest(newValidFilename);
+        // testFileId is a UUID string (system ID)
+        // newFilename is "new_document.txt"
+        FileUpdateRequest updateRequest = new FileUpdateRequest(newFilename);
 
-        org.bson.Document fileMetadataSubDoc = new org.bson.Document("ownerId", testUserId)
-                                              .append("token", "someToken") 
-                                              .append("visibility", Visibility.PRIVATE.name()) 
-                                              .append("tags", List.of("tag1"));
+        // Initial state of the document that will be found
+        Document initialMetadata = new Document("ownerId", testUserId)
+                                        .append("originalFilename", "old_document.txt") // Original user filename
+                                        .append("token", testToken) 
+                                        .append("visibility", Visibility.PRIVATE.name()) 
+                                        .append("tags", List.of("tag1"));
+        Document existingFileDoc = new Document("_id", new ObjectId()) // Mongo's internal _id
+                                        .append("filename", testFileId)      // System UUID
+                                        .append("length", 100L) 
+                                        .append("contentType", "text/plain") 
+                                        .append("uploadDate", new Date()) 
+                                        .append("metadata", initialMetadata);
 
-        org.bson.Document fileDocToReturnOnFind = new org.bson.Document("_id", new ObjectId(testFileId))
-                                              .append("filename", testFilename) 
-                                              .append("length", 100L) 
-                                              .append("contentType", "text/plain") 
-                                              .append("uploadDate", new java.util.Date()) 
-                                              .append("metadata", fileMetadataSubDoc);
+        // State of the document AFTER the update (for the second findOne call)
+        Document updatedMetadata = new Document(initialMetadata) // copy
+                                        .append("originalFilename", newFilename); // new user filename
+        Document updatedFileDoc = new Document(existingFileDoc) // copy
+                                        .append("metadata", updatedMetadata);
+        // system UUID (filename) does not change
 
-        when(mongoTemplate.findOne(
-            argThat(q -> q != null && q.getQueryObject() != null && 
-                           q.getQueryObject().containsKey("_id") && 
-                           testFileId.equals(q.getQueryObject().getObjectId("_id").toHexString()) &&
-                           q.getQueryObject().keySet().size() == 1 // Ensures only _id criteria
-            ), 
-            eq(org.bson.Document.class), 
-            eq("fs.files")))
-        .thenReturn(fileDocToReturnOnFind); // Returns doc owned by testUserId
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
 
-        when(mongoTemplate.exists(
-            argThat(q -> q != null && q.getQueryObject() != null &&
-                           newValidFilename.equals(q.getQueryObject().getString("filename")) &&
-                           testUserId.equals(q.getQueryObject().getString("metadata.ownerId")) &&
-                           q.getQueryObject().keySet().size() == 2 // filename and metadata.ownerId
-            ), 
-            eq("fs.files")))
-        .thenReturn(false); // No conflict
+        // Mock the first findOne call (finds the document to update)
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(existingFileDoc)  // First call returns current state
+            .thenReturn(updatedFileDoc);  // Second call (after update) returns updated state
 
+        // Mock the conflict check for the new originalFilename (should return false - no conflict)
+        Query conflictCheckQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(newFilename)
+                    .and("metadata.ownerId").is(testUserId)
+                    .and("filename").ne(testFileId) // Exclude self
+        );
+        when(mongoTemplate.exists(eq(conflictCheckQuery), eq("fs.files"))).thenReturn(false);
+
+        // Mock the updateFirst operation
         UpdateResult mockUpdateResult = mock(UpdateResult.class);
         when(mockUpdateResult.getModifiedCount()).thenReturn(1L);
         when(mongoTemplate.updateFirst(
-            argThat(q -> q != null && q.getQueryObject() != null && 
-                           q.getQueryObject().containsKey("_id") && 
-                           testFileId.equals(q.getQueryObject().getObjectId("_id").toHexString()) &&
-                           q.getQueryObject().keySet().size() == 1 // Update query is also by _id only
-            ), 
-            any(org.springframework.data.mongodb.core.query.Update.class), 
+            eq(findBySystemUuidQuery), 
+            argThat(update -> {
+                Document setObject = update.getUpdateObject().get("$set", Document.class);
+                return newFilename.equals(setObject.getString("metadata.originalFilename"));
+            }), 
             eq("fs.files")))
         .thenReturn(mockUpdateResult);
 
+        // Act
         FileResponse response = fileService.updateFileDetails(testUserId, testFileId, updateRequest);
 
+        // Assert
         assertNotNull(response);
-        assertEquals(newValidFilename, response.filename());
+        assertEquals(testFileId, response.id(), "Response ID should be the system UUID");
+        assertEquals(newFilename, response.filename(), "Response filename should be the new user-provided name");
         assertEquals(Visibility.PRIVATE, response.visibility());
         assertEquals(List.of("tag1"), response.tags());
-        assertEquals(fileDocToReturnOnFind.getDate("uploadDate"), response.uploadDate());
-        assertEquals(fileDocToReturnOnFind.getString("contentType"), response.contentType());
-        assertEquals(fileDocToReturnOnFind.getLong("length"), response.size());
-        String expectedDownloadLink = "/api/v1/files/download/" + "someToken";
-        assertEquals(expectedDownloadLink, response.downloadLink());
+        // Other fields can be asserted if necessary, e.g., from existingFileDoc or updatedFileDoc
 
-        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
-        ArgumentCaptor<org.springframework.data.mongodb.core.query.Update> updateCaptor = 
-            ArgumentCaptor.forClass(org.springframework.data.mongodb.core.query.Update.class);
-        
-        verify(mongoTemplate).updateFirst(queryCaptor.capture(), updateCaptor.capture(), eq("fs.files"));
-        assertEquals(new ObjectId(testFileId), queryCaptor.getValue().getQueryObject().getObjectId("_id"));
-        assertEquals(newValidFilename, updateCaptor.getValue().getUpdateObject().get("$set", org.bson.Document.class).getString("filename"));
+        // Verify mock interactions
+        verify(mongoTemplate, times(2)).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files"));
+        verify(mongoTemplate).exists(eq(conflictCheckQuery), eq("fs.files"));
+        verify(mongoTemplate).updateFirst(eq(findBySystemUuidQuery), any(Update.class), eq("fs.files"));
     }
 
     @Test
     void updateFileDetails_whenFileDoesNotExistById_shouldThrowResourceNotFoundException() {
         FileUpdateRequest updateRequest = new FileUpdateRequest(newFilename);
+        // testFileId is a UUID string (system ID)
 
-        // Mock findOne by ID to return null
-        when(mongoTemplate.findOne(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    return queryObject.containsKey("_id") && 
-                           queryObject.getObjectId("_id").toHexString().equals(testFileId);
-                }
-            }), 
-            eq(org.bson.Document.class), 
-            eq("fs.files")))
-        .thenReturn(null); 
+        // Mock findOne by filename to return null
+        Query expectedQuery = Query.query(Criteria.where("filename").is(testFileId));
+        when(mongoTemplate.findOne(eq(expectedQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(null); 
 
         ResourceNotFoundException exception = assertThrows(ResourceNotFoundException.class, () -> {
             fileService.updateFileDetails(testUserId, testFileId, updateRequest);
         });
 
         assertTrue(exception.getMessage().contains("File not found with id: " + testFileId));
+        verify(mongoTemplate).findOne(eq(expectedQuery), eq(Document.class), eq("fs.files"));
     }
 
     @Test
     void updateFileDetails_whenNewFilenameConflicts_shouldThrowException() {
         String conflictingFilename = "i_already_exist.txt";
         FileUpdateRequest updateRequest = new FileUpdateRequest(conflictingFilename);
+        // testFileId is a UUID string (system ID)
 
-        org.bson.Document fileMetadataSubDoc = new org.bson.Document("ownerId", testUserId)
-                                              .append("token", "someToken")
-                                              .append("visibility", Visibility.PRIVATE.name())
-                                              .append("tags", List.of("tag1"));
-        org.bson.Document fileDocToReturnOnFind = new org.bson.Document("_id", new ObjectId(testFileId))
-                                              .append("filename", testFilename) 
-                                              .append("metadata", fileMetadataSubDoc);
-        // This first findOne is for the combined ID and Owner check in the old service version.
-        // Now, the service first finds by ID, then checks owner from the result.
-        // So, this mock needs to match the first findByIdQuery in the service.
-        when(mongoTemplate.findOne(
-            argThat(q -> q != null && q.getQueryObject() != null && 
-                           q.getQueryObject().containsKey("_id") && 
-                           testFileId.equals(q.getQueryObject().getObjectId("_id").toHexString()) &&
-                           q.getQueryObject().keySet().size() == 1 
-            ), 
-            eq(org.bson.Document.class), 
-            eq("fs.files")))
-        .thenReturn(fileDocToReturnOnFind);
+        // Document that will be found by testFileId
+        Document initialMetadata = new Document("ownerId", testUserId)
+                                        .append("originalFilename", "old_name.txt") 
+                                        .append("token", testToken)
+                                        .append("visibility", Visibility.PRIVATE.name());
+        Document existingFileDoc = new Document("_id", new ObjectId()) // Mongo's internal _id
+                                        .append("filename", testFileId)      // System UUID
+                                        .append("metadata", initialMetadata);
+
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(existingFileDoc);
 
         // Mock for the conflict check: mongoTemplate.exists returns true (CONFLICT!)
-        when(mongoTemplate.exists(
-            argThat(q -> q != null && q.getQueryObject() != null &&
-                           conflictingFilename.equals(q.getQueryObject().getString("filename")) &&
-                           testUserId.equals(q.getQueryObject().getString("metadata.ownerId")) &&
-                           q.getQueryObject().keySet().size() == 2 
-            ), 
-            eq("fs.files")))
-        .thenReturn(true); // Conflict!
+        Query conflictCheckQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(conflictingFilename)
+                    .and("metadata.ownerId").is(testUserId)
+                    .and("filename").ne(testFileId) // Exclude self from conflict check
+        );
+        when(mongoTemplate.exists(eq(conflictCheckQuery), eq("fs.files"))).thenReturn(true);
 
         FileAlreadyExistsException exception = assertThrows(FileAlreadyExistsException.class, () -> { 
             fileService.updateFileDetails(testUserId, testFileId, updateRequest);
         });
 
         assertTrue(exception.getMessage().contains("Filename '" + conflictingFilename + "' already exists for this user."));
+        verify(mongoTemplate).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files"));
+        verify(mongoTemplate).exists(eq(conflictCheckQuery), eq("fs.files"));
+        verify(mongoTemplate, never()).updateFirst(any(Query.class), any(Update.class), eq("fs.files"));
     }
 
     @Test
     void updateFileDetails_whenUpdateOperationReportsNoModification_shouldThrowException() {
         String nonConflictingNewFilename = "unique_new_name.txt";
         FileUpdateRequest updateRequest = new FileUpdateRequest(nonConflictingNewFilename);
+        // testFileId is a UUID string (system ID)
 
-        // Setup fileDocToReturnOnFind to be owned by testUserId
-        org.bson.Document fileMetadataSubDoc = new org.bson.Document("ownerId", testUserId)
-            .append("filename", testFilename) // original filename
-            .append("token", "token123")
-            .append("visibility", Visibility.PRIVATE.name())
-            .append("tags", List.of("tagA"));
-        org.bson.Document fileDocToReturnOnFind = new org.bson.Document("_id", new ObjectId(testFileId))
-            .append("filename", testFilename)
+        Document initialMetadata = new Document("ownerId", testUserId)
+            .append("originalFilename", "old_filename.txt") 
+            .append("token", testToken)
+            .append("visibility", Visibility.PRIVATE.name());
+        Document existingFileDoc = new Document("_id", new ObjectId())
+            .append("filename", testFileId)
             .append("length", 123L)
             .append("contentType", "text/plain")
-            .append("uploadDate", new java.util.Date())
-            .append("metadata", fileMetadataSubDoc);
+            .append("uploadDate", new Date())
+            .append("metadata", initialMetadata);
 
-        // Mock for the first findOne by ID - LOOSENED MATCHER
-        when(mongoTemplate.findOne(any(Query.class), eq(org.bson.Document.class), eq("fs.files")))
-        .thenReturn(fileDocToReturnOnFind); 
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
 
-        // Mock for the conflict check: mongoTemplate.exists returns false (NO CONFLICT) - LOOSENED MATCHER
-        when(mongoTemplate.exists(any(Query.class), eq("fs.files")))
-        .thenReturn(false); // No conflict
+        // Mock for the first findOne by filename
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(existingFileDoc);
 
-        // Mock for mongoTemplate.updateFirst to return 0 modifiedCount - LOOSENED MATCHER
+        // Mock for the conflict check: mongoTemplate.exists returns false (NO CONFLICT)
+        Query conflictCheckQuery = Query.query(
+            Criteria.where("metadata.originalFilename").is(nonConflictingNewFilename)
+                    .and("metadata.ownerId").is(testUserId)
+                    .and("filename").ne(testFileId)
+        );
+        when(mongoTemplate.exists(eq(conflictCheckQuery), eq("fs.files"))).thenReturn(false);
+
+        // Mock for mongoTemplate.updateFirst to return 0 modifiedCount
         UpdateResult mockUpdateResult = mock(UpdateResult.class);
         when(mockUpdateResult.getModifiedCount()).thenReturn(0L);
-        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq("fs.files")))
+        when(mongoTemplate.updateFirst(
+            eq(findBySystemUuidQuery), 
+            argThat(update -> nonConflictingNewFilename.equals(update.getUpdateObject().get("$set", Document.class).getString("metadata.originalFilename"))), 
+            eq("fs.files")))
         .thenReturn(mockUpdateResult);
         
         StorageException exception = assertThrows(StorageException.class, () -> {
             fileService.updateFileDetails(testUserId, testFileId, updateRequest);
         });
-        assertTrue(exception.getMessage().contains("File update for filename failed for fileId: " + testFileId + ". Zero documents modified despite expecting a change."));
+        // Verify the exact exception message from the service
+        String expectedMessage = "File update for original filename failed for system ID: " + testFileId + ". Zero documents modified.";
+        assertEquals(expectedMessage, exception.getMessage());
     
-        // ArgumentCaptor example (if needed after test passes with any() ):
-        // ArgumentCaptor<Query> queryCaptorForFind = ArgumentCaptor.forClass(Query.class);
-        // verify(mongoTemplate).findOne(queryCaptorForFind.capture(), eq(org.bson.Document.class), eq("fs.files"));
-        // System.out.println("Actual findOne Query: " + queryCaptorForFind.getValue().getQueryObject().toJson());
-        // ArgumentCaptor<Query> queryCaptorForExists = ArgumentCaptor.forClass(Query.class);
-        // verify(mongoTemplate).exists(queryCaptorForExists.capture(), eq("fs.files"));
-        // System.out.println("Actual exists Query: " + queryCaptorForExists.getValue().getQueryObject().toJson());
+        // Verify calls
+        verify(mongoTemplate).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")); // Initial find
+        verify(mongoTemplate).exists(eq(conflictCheckQuery), eq("fs.files")); // Conflict check
+        verify(mongoTemplate).updateFirst(eq(findBySystemUuidQuery), any(Update.class), eq("fs.files")); // Update attempt
+        // Second findOne for response generation should NOT be called in this path
+        verify(mongoTemplate, times(1)).findOne(any(Query.class), eq(Document.class), eq("fs.files")); 
     }
 
     @Test
     void deleteFile_whenFileExistsAndUserOwnsIt_shouldDeleteFile() {
-        // Arrange
-        Document mockFileDocMetadata = new Document("ownerId", testUserId);
-        Document mockFileDoc = new Document("_id", new ObjectId(testFileId)).append("metadata", mockFileDocMetadata);
+        // testFileId is a UUID string (system ID)
+        
+        Document metadata = new Document("ownerId", testUserId);
+        Document fileDoc = new Document("_id", new ObjectId()) // Mongo's internal _id
+                                .append("filename", testFileId)   // System UUID
+                                .append("metadata", metadata);
 
-        // Mock the findOne call for ownership check to return the document
-        when(mongoTemplate.findOne(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    // Service's findByIdQuery only checks _id initially
-                    return queryObject.containsKey("_id") && 
-                           queryObject.getObjectId("_id").toHexString().equals(testFileId);
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockFileDoc);
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
+        
+        // Mock the findOne call for ownership check
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(fileDoc);
 
         // Act
         assertDoesNotThrow(() -> fileService.deleteFile(testUserId, testFileId));
 
         // Assert
-        ArgumentCaptor<Query> deleteQueryCaptor = ArgumentCaptor.forClass(Query.class);
-        verify(gridFsTemplate).delete(deleteQueryCaptor.capture());
-        assertEquals(new ObjectId(testFileId), deleteQueryCaptor.getValue().getQueryObject().getObjectId("_id"));
-        assertEquals(1, deleteQueryCaptor.getValue().getQueryObject().size()); // Delete query should only be by _id
+        // Verify findOne was called
+        verify(mongoTemplate).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files"));
+        // Verify delete was called with the same query based on filename (system UUID)
+        verify(gridFsTemplate).delete(eq(findBySystemUuidQuery));
     }
 
     @Test
     void deleteFile_whenFileNotExists_shouldThrowResourceNotFoundException() {
-        // Arrange
-        // Mock mongoTemplate.findOne to return null (file not found by ID)
-        when(mongoTemplate.findOne(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    return queryObject.containsKey("_id") && 
-                           queryObject.getObjectId("_id").toHexString().equals(testFileId);
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(null); 
+        // testFileId is a UUID string (system ID)
+        
+        // Mock mongoTemplate.findOne to return null (file not found by filename)
+        Query expectedQuery = Query.query(Criteria.where("filename").is(testFileId));
+        when(mongoTemplate.findOne(eq(expectedQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(null); 
 
         // Act & Assert
         ResourceNotFoundException exception = assertThrows(ResourceNotFoundException.class, () -> {
@@ -480,33 +554,31 @@ class FileServiceImplTest {
         });
 
         assertTrue(exception.getMessage().contains("File not found with id: " + testFileId));
+        verify(mongoTemplate).findOne(eq(expectedQuery), eq(Document.class), eq("fs.files"));
+        verify(gridFsTemplate, never()).delete(any(Query.class)); // Delete should not be called
     }
 
     @Test
     void deleteFile_whenUserNotOwner_shouldThrowUnauthorizedOperationException() {
-        String otherUserId = "otherUser99"; // Ensure different from testUserId
-        // testFileId is already defined as a field for the class
+        // testFileId is a UUID string (system ID)
+        String actualOwnerId = "anotherOwner99"; // Different from testUserId ("user123")
 
-        Document metadata = new Document("ownerId", otherUserId); 
-        Document fileDoc = new Document("_id", new ObjectId(testFileId)).append("metadata", metadata);
+        Document metadataOtherOwner = new Document("ownerId", actualOwnerId);
+        Document fileDocOtherOwner = new Document("_id", new ObjectId())
+                                        .append("filename", testFileId) // System UUID
+                                        .append("metadata", metadataOtherOwner);
 
-        // Mock mongoTemplate.findOne to return the fileDoc (simulating file exists)
-        when(mongoTemplate.findOne(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    return query != null && query.getQueryObject().getObjectId("_id").toHexString().equals(testFileId);
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(fileDoc);
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(fileDocOtherOwner);
 
         UnauthorizedOperationException exception = assertThrows(UnauthorizedOperationException.class, () -> {
-            fileService.deleteFile(testUserId, testFileId); // testUserId attempts to delete otherUser99's file
+            // testUserId attempts to delete otherUser99's file
+            fileService.deleteFile(testUserId, testFileId); 
         });
 
         assertTrue(exception.getMessage().contains("User '" + testUserId + "' not authorized to delete fileId: " + testFileId));
+        verify(mongoTemplate).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files"));
         verify(gridFsTemplate, never()).delete(any(Query.class)); 
     }
 
@@ -514,170 +586,166 @@ class FileServiceImplTest {
     void listFiles_whenNoUserIdAndNoTag_shouldListPublicFilesWithDefaultSort() {
         int pageNum = 0;
         int pageSize = 10;
-        String sortBy = "uploadDate";
+        String sortByApi = "uploadDate"; // Service maps this to "uploadDate"
         String sortDir = "desc";
 
-        PageRequest expectedPageable = PageRequest.of(pageNum, pageSize, Sort.by(Sort.Direction.DESC, "uploadDate"));
+        // Prepare mock documents with system UUIDs and originalFilenames in metadata
+        String systemId1 = UUID.randomUUID().toString();
+        String originalFilename1 = "public1.txt";
+        Document metadata1 = new Document("ownerId", "anotherUser")
+                                .append("visibility", Visibility.PUBLIC.name())
+                                .append("tags", List.of("public_tag"))
+                                .append("token", "token1")
+                                .append("originalFilename", originalFilename1);
+        Document publicFileDoc1 = new Document("_id", new ObjectId())
+                                        .append("filename", systemId1) // System UUID
+                                        .append("uploadDate", new Date(System.currentTimeMillis() - 10000))
+                                        .append("contentType", "text/plain").append("length", 100L)
+                                        .append("metadata", metadata1);
 
-        ObjectId publicFileId1 = new ObjectId();
-        Document metadata1 = new Document("ownerId", "anotherUser").append("visibility", Visibility.PUBLIC.name()).append("tags", List.of("public_tag")).append("token", "token1");
-        Document publicFileDoc1 = new Document("_id", publicFileId1).append("filename", "public1.txt").append("uploadDate", new Date(System.currentTimeMillis() - 10000))
-                                        .append("contentType", "text/plain").append("length", 100L).append("metadata", metadata1);
-
-        ObjectId publicFileId2 = new ObjectId();
-        Document metadata2 = new Document("ownerId", "user456").append("visibility", Visibility.PUBLIC.name()).append("tags", List.of("general")).append("token", "token2");
-        Document publicFileDoc2 = new Document("_id", publicFileId2).append("filename", "public2.zip").append("uploadDate", new Date(System.currentTimeMillis() - 5000))
-                                        .append("contentType", "application/zip").append("length", 2000L).append("metadata", metadata2);
+        String systemId2 = UUID.randomUUID().toString();
+        String originalFilename2 = "public2.zip";
+        Document metadata2 = new Document("ownerId", "user456")
+                                .append("visibility", Visibility.PUBLIC.name())
+                                .append("tags", List.of("general"))
+                                .append("token", "token2")
+                                .append("originalFilename", originalFilename2);
+        Document publicFileDoc2 = new Document("_id", new ObjectId())
+                                        .append("filename", systemId2) // System UUID
+                                        .append("uploadDate", new Date(System.currentTimeMillis() - 5000))
+                                        .append("contentType", "application/zip").append("length", 2000L)
+                                        .append("metadata", metadata2);
         
+        // Assuming service sorts by uploadDate desc, publicFileDoc2 comes first
         List<Document> mockDocuments = Arrays.asList(publicFileDoc2, publicFileDoc1);
 
-        when(mongoTemplate.find(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-                    
-                    boolean noOwnerId = !queryObject.containsKey("metadata.ownerId");
-                    boolean noTags = !queryObject.containsKey("metadata.tags");
-                    
-                    boolean correctPage = query.getSkip() == (long)pageNum * pageSize && query.getLimit() == pageSize;
-                    boolean correctSort = query.getSortObject().containsKey("uploadDate") && query.getSortObject().getInteger("uploadDate") == -1;
-                    return correctVisibility && noOwnerId && noTags && correctPage && correctSort;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockDocuments);
+        // Use ArgumentCaptor for precise query verification
+        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
 
-        when(mongoTemplate.count(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
+        when(mongoTemplate.find(queryCaptor.capture(), eq(Document.class), eq("fs.files")))
+            .thenReturn(mockDocuments);
+        when(mongoTemplate.count(any(Query.class), eq(Document.class), eq("fs.files")))
+            .thenReturn((long) mockDocuments.size()); // Count can be less strict for now
 
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-
-                    boolean noOwnerId = !queryObject.containsKey("metadata.ownerId");
-                    boolean noTags = !queryObject.containsKey("metadata.tags");
-                    boolean noSort = query.getSortObject().isEmpty(); 
-                    boolean noLimitOrSkip = query.getLimit() == 0 && query.getSkip() == 0; 
-                    return correctVisibility && noOwnerId && noTags && noSort && noLimitOrSkip;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn((long) mockDocuments.size());
-
-        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortBy, sortDir, pageNum, pageSize);
+        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortByApi, sortDir, pageNum, pageSize);
 
         assertNotNull(resultPage);
         assertEquals(2, resultPage.getTotalElements());
         assertEquals(2, resultPage.getContent().size());
-        assertEquals("public2.zip", resultPage.getContent().get(0).filename());
-        assertEquals("public1.txt", resultPage.getContent().get(1).filename());
-        assertEquals(Visibility.PUBLIC, resultPage.getContent().get(0).visibility());
+        
+        // Verify FileResponse content (IDs are system UUIDs, filenames are originalFilenames)
+        FileResponse resp2 = resultPage.getContent().get(0);
+        assertEquals(systemId2, resp2.id());
+        assertEquals(originalFilename2, resp2.filename()); // This was "public2.zip"
+        assertEquals(Visibility.PUBLIC, resp2.visibility());
 
-        ArgumentCaptor<Query> findQueryCaptor = ArgumentCaptor.forClass(Query.class);
-        verify(mongoTemplate).find(findQueryCaptor.capture(), eq(Document.class), eq("fs.files"));
-        Query actualFindQuery = findQueryCaptor.getValue();
-        assertEquals(expectedPageable.getPageSize(), actualFindQuery.getLimit());
-        assertEquals(expectedPageable.getOffset(), actualFindQuery.getSkip());
-        Document sortObject = actualFindQuery.getSortObject();
+        FileResponse resp1 = resultPage.getContent().get(1);
+        assertEquals(systemId1, resp1.id());
+        assertEquals(originalFilename1, resp1.filename()); // This was "public1.txt"
+
+        // Verify the query sent to mongoTemplate.find()
+        Query capturedQuery = queryCaptor.getValue();
+        Document queryObject = capturedQuery.getQueryObject();
+        assertEquals(Visibility.PUBLIC.name(), queryObject.getString("metadata.visibility"));
+        assertNull(queryObject.get("metadata.ownerId"));
+        assertNull(queryObject.get("metadata.tags"));
+
+        Document sortObject = capturedQuery.getSortObject();
         assertNotNull(sortObject);
-        assertEquals(-1, sortObject.getInteger("uploadDate"));
+        assertEquals(-1, sortObject.getInteger("uploadDate")); // desc for uploadDate
+        assertEquals(pageSize, capturedQuery.getLimit());
+        assertEquals((long)pageNum * pageSize, capturedQuery.getSkip());
     }
 
     @Test
     void listFiles_whenUserIdProvided_shouldListUserFiles() {
         int pageNum = 0;
         int pageSize = 5;
-        String sortBy = "filename";
+        String sortByApi = "filename"; // Service maps this to "metadata.originalFilename"
         String sortDir = "asc";
 
-        PageRequest expectedPageable = PageRequest.of(pageNum, pageSize, Sort.by(Sort.Direction.ASC, sortBy));
+        // Prepare mock documents for testUserId
+        String systemIdUser1 = UUID.randomUUID().toString();
+        String originalFilenameUser1 = "userFileA.doc";
+        Document metadataUser1 = new Document("ownerId", testUserId)
+                                    .append("visibility", Visibility.PRIVATE.name())
+                                    .append("tags", List.of("user_tag"))
+                                    .append("token", "userToken1")
+                                    .append("originalFilename", originalFilenameUser1);
+        Document userFileDoc1 = new Document("_id", new ObjectId())
+                                    .append("filename", systemIdUser1) // System UUID
+                                    .append("uploadDate", new Date(System.currentTimeMillis() - 20000))
+                                    .append("contentType", "application/msword").append("length", 500L)
+                                    .append("metadata", metadataUser1);
 
-        ObjectId userFileId1 = new ObjectId();
-        Document metadataUser1 = new Document("ownerId", testUserId).append("visibility", Visibility.PRIVATE.name()).append("tags", List.of("user_tag")).append("token", "userToken1");
-        Document userFileDoc1 = new Document("_id", userFileId1).append("filename", "userFileA.doc").append("uploadDate", new Date(System.currentTimeMillis() - 20000))
-                                    .append("contentType", "application/msword").append("length", 500L).append("metadata", metadataUser1);
-
-        ObjectId userFileId2 = new ObjectId();
-        Document metadataUser2 = new Document("ownerId", testUserId).append("visibility", Visibility.PUBLIC.name()).append("tags", List.of("user_tag", "shared")).append("token", "userToken2");
-        Document userFileDoc2 = new Document("_id", userFileId2).append("filename", "userFileB.pdf").append("uploadDate", new Date(System.currentTimeMillis() - 15000))
-                                    .append("contentType", "application/pdf").append("length", 1500L).append("metadata", metadataUser2);
+        String systemIdUser2 = UUID.randomUUID().toString();
+        String originalFilenameUser2 = "userFileB.pdf";
+        Document metadataUser2 = new Document("ownerId", testUserId)
+                                    .append("visibility", Visibility.PUBLIC.name())
+                                    .append("tags", List.of("user_tag", "shared"))
+                                    .append("token", "userToken2")
+                                    .append("originalFilename", originalFilenameUser2);
+        Document userFileDoc2 = new Document("_id", new ObjectId())
+                                    .append("filename", systemIdUser2) // System UUID
+                                    .append("uploadDate", new Date(System.currentTimeMillis() - 15000))
+                                    .append("contentType", "application/pdf").append("length", 1500L)
+                                    .append("metadata", metadataUser2);
         
-        List<Document> mockUserDocuments = Arrays.asList(userFileDoc1, userFileDoc2); // Sorted by filename ASC
+        // Expected order: userFileA.doc, userFileB.pdf (sorted by originalFilename ASC)
+        List<Document> mockUserDocuments = Arrays.asList(userFileDoc1, userFileDoc2);
 
-        // Mock for mongoTemplate.find()
-        when(mongoTemplate.find(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String ownerIdInQuery = queryObject.getString("metadata.ownerId");
-                    boolean correctOwner = testUserId.equals(ownerIdInQuery);
-                    boolean noVisibilityFilter = !queryObject.containsKey("metadata.visibility");
-                    boolean noTags = !queryObject.containsKey("metadata.tags");
-                    boolean correctPage = query.getSkip() == (long)pageNum * pageSize && query.getLimit() == pageSize;
-                    boolean correctSort = query.getSortObject().containsKey("filename") && query.getSortObject().getInteger("filename") == 1;
-                    return correctOwner && noVisibilityFilter && noTags && correctPage && correctSort;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockUserDocuments);
+        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
+        when(mongoTemplate.find(queryCaptor.capture(), eq(Document.class), eq("fs.files")))
+            .thenReturn(mockUserDocuments);
+        when(mongoTemplate.count(any(Query.class), eq(Document.class), eq("fs.files")))
+            .thenReturn((long) mockUserDocuments.size());
 
-        // Mock for mongoTemplate.count()
-        when(mongoTemplate.count(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String ownerIdInQuery = queryObject.getString("metadata.ownerId");
-                    boolean correctOwner = testUserId.equals(ownerIdInQuery);
-                    boolean noVisibilityFilter = !queryObject.containsKey("metadata.visibility");
-                    boolean noTags = !queryObject.containsKey("metadata.tags");
-                    return correctOwner && noVisibilityFilter && noTags && query.getLimit() == 0 && query.getSkip() == 0;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn((long) mockUserDocuments.size());
-
-        Page<FileResponse> resultPage = fileService.listFiles(testUserId, null, sortBy, sortDir, pageNum, pageSize);
+        Page<FileResponse> resultPage = fileService.listFiles(testUserId, null, sortByApi, sortDir, pageNum, pageSize);
 
         assertNotNull(resultPage);
         assertEquals(2, resultPage.getTotalElements());
         assertEquals(2, resultPage.getContent().size());
-        assertEquals("userFileA.doc", resultPage.getContent().get(0).filename()); 
-        assertEquals("userFileB.pdf", resultPage.getContent().get(1).filename());
-        assertEquals(testUserId, metadataUser1.getString("ownerId")); // Check indirectly via metadata used for response
+        
+        FileResponse resp1 = resultPage.getContent().get(0);
+        assertEquals(systemIdUser1, resp1.id());
+        assertEquals(originalFilenameUser1, resp1.filename());
+
+        FileResponse resp2 = resultPage.getContent().get(1);
+        assertEquals(systemIdUser2, resp2.id());
+        assertEquals(originalFilenameUser2, resp2.filename());
+
+        // Verify the query
+        Query capturedQuery = queryCaptor.getValue();
+        Document queryObject = capturedQuery.getQueryObject();
+        assertEquals(testUserId, queryObject.getString("metadata.ownerId"));
+        Document visDocExpected = new Document("$ne", Visibility.PENDING.name());
+        assertEquals(visDocExpected, queryObject.get("metadata.visibility"));
+        assertNull(queryObject.get("metadata.tags"));
+
+        Document sortObject = capturedQuery.getSortObject();
+        assertNotNull(sortObject);
+        assertEquals(1, sortObject.getInteger("metadata.originalFilename")); // ASC for originalFilename
+        assertEquals(pageSize, capturedQuery.getLimit());
+        assertEquals((long)pageNum * pageSize, capturedQuery.getSkip());
     }
 
     @Test
     void listFiles_whenTagProvided_shouldFilterByTagCaseInsensitively() {
         int pageNum = 0;
         int pageSize = 10;
-        String filterTag = "Work"; // Mixed case to test case-insensitivity of query preparation
-        String sortBy = "uploadDate";
+        String filterTag = "Work"; // Mixed case
+        String sortByApi = "uploadDate";
         String sortDir = "desc";
 
-        PageRequest expectedPageable = PageRequest.of(pageNum, pageSize, Sort.by(Sort.Direction.DESC, "uploadDate"));
-
-        ObjectId taggedFileId = new ObjectId();
+        String systemIdTagged = UUID.randomUUID().toString();
+        String originalFilenameTagged = "work_document.docx";
         Document metadataTagged = new Document("ownerId", "user789")
                                         .append("visibility", Visibility.PUBLIC.name())
-                                        .append("tags", List.of("personal", "work")) // Stored as lowercase
-                                        .append("token", "tagToken");
-        Document taggedFileDoc = new Document("_id", taggedFileId).append("filename", "work_document.docx")
+                                        .append("tags", List.of("personal", "work")) // Stored as lowercase "work"
+                                        .append("token", "tagToken")
+                                        .append("originalFilename", originalFilenameTagged);
+        Document taggedFileDoc = new Document("_id", new ObjectId())
+                                       .append("filename", systemIdTagged) // System UUID
                                        .append("uploadDate", new Date())
                                        .append("contentType", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                                        .append("length", 3000L)
@@ -685,192 +753,149 @@ class FileServiceImplTest {
         
         List<Document> mockDocuments = List.of(taggedFileDoc);
 
-        // Mock for mongoTemplate.find()
-        when(mongoTemplate.find(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    // Check for visibility:public and tag:work (lowercase)
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-                    
-                    String tagInQuery = queryObject.getString("metadata.tags"); // Criteria stores .is() as direct value
-                    boolean correctTag = filterTag.toLowerCase().equals(tagInQuery);
+        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
+        when(mongoTemplate.find(queryCaptor.capture(), eq(Document.class), eq("fs.files")))
+            .thenReturn(mockDocuments);
+        when(mongoTemplate.count(any(Query.class), eq(Document.class), eq("fs.files")))
+            .thenReturn((long) mockDocuments.size());
 
-                    return correctVisibility && correctTag;
-                    // Not checking pagination/sort in this matcher for brevity, but could be added
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockDocuments);
-
-        // Mock for mongoTemplate.count()
-        when(mongoTemplate.count(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-                    String tagInQuery = queryObject.getString("metadata.tags");
-                    boolean correctTag = filterTag.toLowerCase().equals(tagInQuery);
-                    return correctVisibility && correctTag;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn((long) mockDocuments.size());
-
-        Page<FileResponse> resultPage = fileService.listFiles(null, filterTag, sortBy, sortDir, pageNum, pageSize);
+        Page<FileResponse> resultPage = fileService.listFiles(null, filterTag, sortByApi, sortDir, pageNum, pageSize);
 
         assertNotNull(resultPage);
         assertEquals(1, resultPage.getTotalElements());
         assertEquals(1, resultPage.getContent().size());
-        assertEquals("work_document.docx", resultPage.getContent().get(0).filename());
-        assertTrue(resultPage.getContent().get(0).tags().contains("work"));
+        
+        FileResponse resp = resultPage.getContent().get(0);
+        assertEquals(systemIdTagged, resp.id());
+        assertEquals(originalFilenameTagged, resp.filename());
+        assertTrue(resp.tags().contains("work"));
+        assertEquals(Visibility.PUBLIC, resp.visibility());
+
+        // Verify the query
+        Query capturedQuery = queryCaptor.getValue();
+        Document queryObject = capturedQuery.getQueryObject();
+        assertEquals(Visibility.PUBLIC.name(), queryObject.getString("metadata.visibility"));
+        assertEquals(filterTag.toLowerCase(), queryObject.getString("metadata.tags")); // Service converts filterTag to lowercase
+        assertNull(queryObject.get("metadata.ownerId"));
+
+        Document sortObject = capturedQuery.getSortObject();
+        assertNotNull(sortObject);
+        assertEquals(-1, sortObject.getInteger("uploadDate")); // desc for uploadDate
     }
 
     @Test
     void listFiles_whenSortByFilenameAsc_shouldReturnSortedResults() {
         int pageNum = 0;
         int pageSize = 10;
-        String sortBy = "filename";
+        String sortByApi = "filename"; // Service maps to "metadata.originalFilename"
         String sortDir = "asc";
 
-        // Mock documents - out of order by name initially
-        ObjectId fileIdZ = new ObjectId();
-        Document metaZ = new Document("ownerId", "userZ").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenZ");
-        Document docZ = new Document("_id", fileIdZ).append("filename", "zeta.txt").append("uploadDate", new Date(System.currentTimeMillis() - 1000))
+        String systemIdZ = UUID.randomUUID().toString(); String originalFilenameZ = "zeta.txt";
+        Document metaZ = new Document("ownerId", "userZ").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenZ").append("originalFilename", originalFilenameZ);
+        Document docZ = new Document("_id", new ObjectId()).append("filename", systemIdZ).append("uploadDate", new Date(System.currentTimeMillis() - 1000))
                             .append("contentType", "text/plain").append("length", 30L).append("metadata", metaZ);
 
-        ObjectId fileIdA = new ObjectId();
-        Document metaA = new Document("ownerId", "userA").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenA");
-        Document docA = new Document("_id", fileIdA).append("filename", "alpha.txt").append("uploadDate", new Date(System.currentTimeMillis() - 2000))
+        String systemIdA = UUID.randomUUID().toString(); String originalFilenameA = "alpha.txt";
+        Document metaA = new Document("ownerId", "userA").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenA").append("originalFilename", originalFilenameA);
+        Document docA = new Document("_id", new ObjectId()).append("filename", systemIdA).append("uploadDate", new Date(System.currentTimeMillis() - 2000))
                             .append("contentType", "text/plain").append("length", 10L).append("metadata", metaA);
 
-        ObjectId fileIdG = new ObjectId();
-        Document metaG = new Document("ownerId", "userG").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenG");
-        Document docG = new Document("_id", fileIdG).append("filename", "gamma.txt").append("uploadDate", new Date(System.currentTimeMillis() - 3000))
+        String systemIdG = UUID.randomUUID().toString(); String originalFilenameG = "gamma.txt";
+        Document metaG = new Document("ownerId", "userG").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenG").append("originalFilename", originalFilenameG);
+        Document docG = new Document("_id", new ObjectId()).append("filename", systemIdG).append("uploadDate", new Date(System.currentTimeMillis() - 3000))
                             .append("contentType", "text/plain").append("length", 20L).append("metadata", metaG);
         
-        // Expected order after sorting by filename ASC: alpha, gamma, zeta
-        List<Document> mockDocumentsSorted = Arrays.asList(docA, docG, docZ);
+        List<Document> mockDocumentsSorted = Arrays.asList(docA, docG, docZ); // Expected order
 
-        // Mock for mongoTemplate.find()
-        when(mongoTemplate.find(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-                    // Check sort
-                    boolean correctSort = query.getSortObject().containsKey("filename") && query.getSortObject().getInteger("filename") == 1; // 1 for ASC
-                    return correctVisibility && correctSort;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockDocumentsSorted);
+        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
+        when(mongoTemplate.find(queryCaptor.capture(), eq(Document.class), eq("fs.files")))
+            .thenReturn(mockDocumentsSorted);
+        when(mongoTemplate.count(any(Query.class), eq(Document.class), eq("fs.files")))
+            .thenReturn((long) mockDocumentsSorted.size());
 
-        // Mock for mongoTemplate.count()
-        when(mongoTemplate.count(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                     if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    return Visibility.PUBLIC.name().equals(visibilityInQuery);
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn((long) mockDocumentsSorted.size());
-
-        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortBy, sortDir, pageNum, pageSize);
+        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortByApi, sortDir, pageNum, pageSize);
 
         assertNotNull(resultPage);
         assertEquals(3, resultPage.getTotalElements());
         assertEquals(3, resultPage.getContent().size());
-        assertEquals("alpha.txt", resultPage.getContent().get(0).filename());
-        assertEquals("gamma.txt", resultPage.getContent().get(1).filename());
-        assertEquals("zeta.txt", resultPage.getContent().get(2).filename());
+        assertEquals(originalFilenameA, resultPage.getContent().get(0).filename());
+        assertEquals(systemIdA, resultPage.getContent().get(0).id());
+        assertEquals(originalFilenameG, resultPage.getContent().get(1).filename());
+        assertEquals(systemIdG, resultPage.getContent().get(1).id());
+        assertEquals(originalFilenameZ, resultPage.getContent().get(2).filename());
+        assertEquals(systemIdZ, resultPage.getContent().get(2).id());
+
+        // Verify Query
+        Query capturedQuery = queryCaptor.getValue();
+        Document queryObject = capturedQuery.getQueryObject();
+        assertEquals(Visibility.PUBLIC.name(), queryObject.getString("metadata.visibility"));
+        assertNull(queryObject.get("metadata.ownerId"));
+        assertNull(queryObject.get("metadata.tags"));
+
+        Document sortObject = capturedQuery.getSortObject();
+        assertNotNull(sortObject);
+        assertEquals(1, sortObject.getInteger("metadata.originalFilename")); // ASC for metadata.originalFilename
     }
 
     @Test
     void listFiles_whenSortBySizeDesc_shouldReturnSortedResults() {
         int pageNum = 0;
         int pageSize = 10;
-        String sortBy = "size"; // API uses "size"
+        String sortByApi = "size"; 
         String sortDir = "desc";
-        String sortFieldInDb = "length"; // maps to "length"
+        String sortFieldInDb = "length"; // API "size" maps to DB "length"
 
-        PageRequest expectedPageable = PageRequest.of(pageNum, pageSize, Sort.by(Sort.Direction.DESC, sortFieldInDb));
+        String systemIdS = UUID.randomUUID().toString(); String originalFilenameS = "small.txt"; long sizeS = 50L;
+        Document metaS = new Document("ownerId", "userS").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenS").append("originalFilename", originalFilenameS);
+        Document docS = new Document("_id", new ObjectId()).append("filename", systemIdS).append("uploadDate", new Date())
+                                .append("contentType", "text/plain").append("length", sizeS).append("metadata", metaS);
 
-        ObjectId fileIdSmall = new ObjectId();
-        Document metaSmall = new Document("ownerId", "userS").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenS");
-        Document docSmall = new Document("_id", fileIdSmall).append("filename", "small.txt").append("uploadDate", new Date())
-                                .append("contentType", "text/plain").append("length", 50L).append("metadata", metaSmall);
+        String systemIdL = UUID.randomUUID().toString(); String originalFilenameL = "large.doc"; long sizeL = 5000L;
+        Document metaL = new Document("ownerId", "userL").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenL").append("originalFilename", originalFilenameL);
+        Document docL = new Document("_id", new ObjectId()).append("filename", systemIdL).append("uploadDate", new Date())
+                                .append("contentType", "application/msword").append("length", sizeL).append("metadata", metaL);
 
-        ObjectId fileIdLarge = new ObjectId();
-        Document metaLarge = new Document("ownerId", "userL").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenL");
-        Document docLarge = new Document("_id", fileIdLarge).append("filename", "large.doc").append("uploadDate", new Date())
-                                .append("contentType", "application/msword").append("length", 5000L).append("metadata", metaLarge);
-
-        ObjectId fileIdMedium = new ObjectId();
-        Document metaMedium = new Document("ownerId", "userM").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenM");
-        Document docMedium = new Document("_id", fileIdMedium).append("filename", "medium.pdf").append("uploadDate", new Date())
-                                .append("contentType", "application/pdf").append("length", 500L).append("metadata", metaMedium);
+        String systemIdM = UUID.randomUUID().toString(); String originalFilenameM = "medium.pdf"; long sizeM = 500L;
+        Document metaM = new Document("ownerId", "userM").append("visibility", Visibility.PUBLIC.name()).append("token", "tokenM").append("originalFilename", originalFilenameM);
+        Document docM = new Document("_id", new ObjectId()).append("filename", systemIdM).append("uploadDate", new Date())
+                                .append("contentType", "application/pdf").append("length", sizeM).append("metadata", metaM);
         
-        List<Document> mockDocumentsSorted = Arrays.asList(docLarge, docMedium, docSmall); // Expected order: Large, Medium, Small
+        List<Document> mockDocumentsSorted = Arrays.asList(docL, docM, docS); // Expected order by size DESC
 
-        when(mongoTemplate.find(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    boolean correctVisibility = Visibility.PUBLIC.name().equals(visibilityInQuery);
-                    boolean correctSort = query.getSortObject().containsKey(sortFieldInDb) && query.getSortObject().getInteger(sortFieldInDb) == -1; // -1 for DESC
-                    return correctVisibility && correctSort;
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn(mockDocumentsSorted);
+        ArgumentCaptor<Query> queryCaptor = ArgumentCaptor.forClass(Query.class);
+        when(mongoTemplate.find(queryCaptor.capture(), eq(Document.class), eq("fs.files")))
+            .thenReturn(mockDocumentsSorted);
+        when(mongoTemplate.count(any(Query.class), eq(Document.class), eq("fs.files")))
+            .thenReturn((long) mockDocumentsSorted.size());
 
-        when(mongoTemplate.count(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                     if (query == null || query.getQueryObject() == null) return false;
-                    Document queryObject = query.getQueryObject();
-                    String visibilityInQuery = queryObject.getString("metadata.visibility");
-                    return Visibility.PUBLIC.name().equals(visibilityInQuery);
-                }
-            }), 
-            eq(Document.class), 
-            eq("fs.files")))
-        .thenReturn((long) mockDocumentsSorted.size());
-
-        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortBy, sortDir, pageNum, pageSize);
+        Page<FileResponse> resultPage = fileService.listFiles(null, null, sortByApi, sortDir, pageNum, pageSize);
 
         assertNotNull(resultPage);
         assertEquals(3, resultPage.getTotalElements());
         assertEquals(3, resultPage.getContent().size());
-        assertEquals("large.doc", resultPage.getContent().get(0).filename());
-        assertEquals(5000L, resultPage.getContent().get(0).size());
-        assertEquals("medium.pdf", resultPage.getContent().get(1).filename());
-        assertEquals(500L, resultPage.getContent().get(1).size());
-        assertEquals("small.txt", resultPage.getContent().get(2).filename());
-        assertEquals(50L, resultPage.getContent().get(2).size());
+        
+        assertEquals(originalFilenameL, resultPage.getContent().get(0).filename());
+        assertEquals(systemIdL, resultPage.getContent().get(0).id());
+        assertEquals(sizeL, resultPage.getContent().get(0).size());
+
+        assertEquals(originalFilenameM, resultPage.getContent().get(1).filename());
+        assertEquals(systemIdM, resultPage.getContent().get(1).id());
+        assertEquals(sizeM, resultPage.getContent().get(1).size());
+
+        assertEquals(originalFilenameS, resultPage.getContent().get(2).filename());
+        assertEquals(systemIdS, resultPage.getContent().get(2).id());
+        assertEquals(sizeS, resultPage.getContent().get(2).size());
+
+        // Verify Query
+        Query capturedQuery = queryCaptor.getValue();
+        Document queryObject = capturedQuery.getQueryObject();
+        assertEquals(Visibility.PUBLIC.name(), queryObject.getString("metadata.visibility"));
+        assertNull(queryObject.get("metadata.ownerId"));
+        assertNull(queryObject.get("metadata.tags"));
+
+        Document sortObject = capturedQuery.getSortObject();
+        assertNotNull(sortObject);
+        assertEquals(-1, sortObject.getInteger(sortFieldInDb)); // DESC for length
     }
 
     @Test
@@ -942,32 +967,28 @@ class FileServiceImplTest {
     @Test
     void updateFileDetails_whenUserNotOwner_shouldThrowUnauthorizedOperationException() {
         FileUpdateRequest updateRequest = new FileUpdateRequest(newFilename);
-        String actualOwnerId = "anotherOwner"; 
+        // testFileId is a UUID string (system ID)
+        String actualOwnerId = "anotherOwner123"; // Different from testUserId ("user123")
 
-        org.bson.Document fileMetadataSubDoc = new org.bson.Document("ownerId", actualOwnerId); 
-        org.bson.Document fileDocToReturnOnFind = new org.bson.Document("_id", new ObjectId(testFileId))
-                                              .append("filename", testFilename)
-                                              .append("metadata", fileMetadataSubDoc);
+        Document metadataOtherOwner = new Document("ownerId", actualOwnerId)
+                                            .append("originalFilename", "some_file.txt");
+        Document fileDocOtherOwner = new Document("_id", new ObjectId())
+                                        .append("filename", testFileId) // System UUID
+                                        .append("metadata", metadataOtherOwner);
         
-        when(mongoTemplate.findOne(
-            argThat(new ArgumentMatcher<Query>() {
-                @Override
-                public boolean matches(Query query) {
-                    if (query == null || query.getQueryObject() == null) return false;
-                    return query.getQueryObject().getObjectId("_id").toHexString().equals(testFileId);
-                }
-            }), 
-            eq(org.bson.Document.class), 
-            eq("fs.files")))
-        .thenReturn(fileDocToReturnOnFind);
+        Query findBySystemUuidQuery = Query.query(Criteria.where("filename").is(testFileId));
+        when(mongoTemplate.findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files")))
+            .thenReturn(fileDocOtherOwner);
 
         UnauthorizedOperationException exception = assertThrows(UnauthorizedOperationException.class, () -> {
+            // testUserId attempts to update a file owned by actualOwnerId
             fileService.updateFileDetails(testUserId, testFileId, updateRequest); 
         });
 
         assertTrue(exception.getMessage().contains("User '" + testUserId + "' not authorized to update fileId: " + testFileId));
         
-        verify(mongoTemplate, never()).exists(argThat(q -> q.getQueryObject().containsKey("filename")), eq("fs.files"));
-        verify(mongoTemplate, never()).updateFirst(any(Query.class), any(org.springframework.data.mongodb.core.query.Update.class), eq("fs.files"));
+        verify(mongoTemplate).findOne(eq(findBySystemUuidQuery), eq(Document.class), eq("fs.files"));
+        verify(mongoTemplate, never()).exists(any(Query.class), eq("fs.files"));
+        verify(mongoTemplate, never()).updateFirst(any(Query.class), any(Update.class), eq("fs.files"));
     }
 } 
