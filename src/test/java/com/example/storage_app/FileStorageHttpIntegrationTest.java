@@ -8,6 +8,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import org.apache.hc.client5.http.classic.methods.HttpDelete;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.classic.methods.HttpPatch;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.entity.mime.FileBody;
 import org.apache.hc.client5.http.entity.mime.HttpMultipartMode;
@@ -18,6 +21,7 @@ import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.HttpEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -139,6 +143,88 @@ public class FileStorageHttpIntegrationTest {
       assertEquals(tag, json.get("tags").get(0).asText());
       assertEquals(fileSize, json.get("size").asLong());
       assertNotNull(json.get("downloadLink"));
+    } finally {
+      tempFile.delete();
+    }
+  }
+
+  @Test
+  void deleteFile_afterFilenameUpdate_shouldSucceed() throws Exception {
+    String baseUrl = "http://localhost:" + port + "/api/v1/files";
+    String userId = "delete-after-update-user";
+    String initialFilename = "initial-delete-test-" + System.currentTimeMillis() + ".txt";
+    String updatedFilename = "updated-delete-test-" + System.currentTimeMillis() + ".txt";
+    String tag = "delete-test";
+    String visibility = "PRIVATE";
+    String fileContent = "Test content for delete after update. " + UUID.randomUUID();
+
+    File tempFile = File.createTempFile("delete-update-test", ".txt");
+    try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+      fos.write(fileContent.getBytes(StandardCharsets.UTF_8));
+    }
+
+    String fileId;
+    ObjectMapper objectMapper = new ObjectMapper();
+
+    try (CloseableHttpClient client = HttpClientBuilder.create().build()) {
+      HttpPost post = new HttpPost(baseUrl);
+      post.addHeader("X-User-Id", userId);
+      String propertiesJson =
+          String.format(
+              "{\"filename\":\"%s\",\"visibility\":\"%s\",\"tags\":[\"%s\"]}",
+              initialFilename, visibility, tag);
+      MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+      builder.addPart("file", new FileBody(tempFile, ContentType.TEXT_PLAIN, initialFilename));
+      builder.addPart("properties", new StringBody(propertiesJson, ContentType.APPLICATION_JSON));
+      post.setEntity(builder.build());
+
+      var response = client.execute(post);
+      int status = response.getCode();
+      String respBody = EntityUtils.toString(response.getEntity());
+      assertEquals(201, status, "Upload failed: " + status + "\n" + respBody);
+      JsonNode json = objectMapper.readTree(respBody);
+      fileId = json.get("id").asText();
+      assertNotNull(fileId, "File ID was null after upload");
+    }
+
+    try (CloseableHttpClient client = HttpClientBuilder.create().build()) {
+      HttpPatch patch = new HttpPatch(baseUrl + "/" + fileId);
+      patch.addHeader("X-User-Id", userId);
+      patch.addHeader("Content-Type", "application/json");
+      String updateJson = String.format("{\"newFilename\":\"%s\"}", updatedFilename);
+      patch.setEntity(new StringEntity(updateJson, ContentType.APPLICATION_JSON));
+
+      var response = client.execute(patch);
+      int status = response.getCode();
+      String respBody = EntityUtils.toString(response.getEntity());
+      assertEquals(200, status, "Update failed: " + status + "\n" + respBody);
+      JsonNode json = objectMapper.readTree(respBody);
+      assertEquals(
+          updatedFilename, json.get("filename").asText(), "Filename not updated correctly");
+    }
+
+    try (CloseableHttpClient client = HttpClientBuilder.create().build()) {
+      HttpDelete delete = new HttpDelete(baseUrl + "/" + fileId);
+      delete.addHeader("X-User-Id", userId);
+
+      var response = client.execute(delete);
+      int status = response.getCode();
+      EntityUtils.consume(response.getEntity());
+      assertEquals(204, status, "Delete failed: Expected 204 No Content, got " + status);
+    }
+
+    try (CloseableHttpClient client = HttpClientBuilder.create().build()) {
+      HttpGet get = new HttpGet(baseUrl + "?page=0&size=1");
+      get.addHeader("X-User-Id", userId);
+
+      var response = client.execute(get);
+      int status = response.getCode();
+      String respBody = EntityUtils.toString(response.getEntity());
+
+      assertEquals(200, status, "List files request failed: " + status);
+      JsonNode json = objectMapper.readTree(respBody);
+      assertEquals(0, json.get("totalElements").asInt(), "File list should be empty after delete");
+
     } finally {
       tempFile.delete();
     }

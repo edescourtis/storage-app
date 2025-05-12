@@ -26,8 +26,10 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
 import org.springframework.data.mongodb.gridfs.GridFsTemplate;
 import org.springframework.http.HttpHeaders;
@@ -48,18 +50,21 @@ public class FileServiceImpl implements FileService {
   private final FileMapper fileMapper;
   private final GridFsHelper gridFsHelper;
   private final FileRecordRepository fileRecordRepository;
+  private final MongoTemplate mongoTemplate;
 
   public FileServiceImpl(
       GridFsTemplate gridFsTemplate,
       FileMetadataBuilder fileMetadataBuilder,
       FileMapper fileMapper,
       GridFsHelper gridFsHelper,
-      FileRecordRepository fileRecordRepository) {
+      FileRecordRepository fileRecordRepository,
+      MongoTemplate mongoTemplate) {
     this.gridFsTemplate = gridFsTemplate;
     this.fileMetadataBuilder = fileMetadataBuilder;
     this.fileMapper = fileMapper;
     this.gridFsHelper = gridFsHelper;
     this.fileRecordRepository = fileRecordRepository;
+    this.mongoTemplate = mongoTemplate;
   }
 
   @Override
@@ -258,22 +263,43 @@ public class FileServiceImpl implements FileService {
     }
 
     log.info(
-        "Updating originalFilename for fileId {} from '{}' to '{}'",
+        "Updating metadata.originalFilename for fileId {} from '{}' to '{}' using MongoTemplate",
         fileId,
         record.getOriginalFilename(),
         newOriginalFilename);
-    record.setOriginalFilename(newOriginalFilename);
+
+    Query query =
+        Query.query(Criteria.where("filename").is(fileId)); // Query by system UUID (filename field)
+    Update update = new Update().set("metadata.originalFilename", newOriginalFilename);
 
     try {
-      FileRecord updatedRecord = fileRecordRepository.save(record);
+      var updateResult = mongoTemplate.updateFirst(query, update, "fs.files");
+
+      if (updateResult.getModifiedCount() == 0) {
+        log.warn(
+            "Update operation modified 0 documents for fileId: {}. File might have been deleted concurrently.",
+            fileId);
+        FileRecord possiblyDeletedRecord =
+            fileRecordRepository
+                .findByFilename(fileId)
+                .orElseThrow(
+                    () ->
+                        new ResourceNotFoundException(
+                            "File not found after update attempt for id: " + fileId));
+        return fileMapper.fromEntity(possiblyDeletedRecord);
+      }
+
+      record.setOriginalFilename(newOriginalFilename);
       log.info(
-          "FileRecord updated and saved. New originalFilename: {}",
-          updatedRecord.getOriginalFilename());
-      return fileMapper.fromEntity(updatedRecord);
-    } catch (
-        DuplicateKeyException e) { // Catch DKE from repository.save if unique index is violated
+          "File metadata.originalFilename updated via MongoTemplate. New originalFilename: {}",
+          newOriginalFilename);
+      return fileMapper.fromEntity(record);
+
+    } catch (DuplicateKeyException e) {
       log.warn(
-          "DuplicateKeyException on updating filename for fileId {}: {}", fileId, e.getMessage());
+          "DuplicateKeyException on updating metadata.originalFilename for fileId {}: {}",
+          fileId,
+          e.getMessage());
       throw new FileAlreadyExistsException(
           "Filename '"
               + newOriginalFilename
@@ -281,7 +307,10 @@ public class FileServiceImpl implements FileService {
           e);
     } catch (DataAccessException e) {
       log.error(
-          "DataAccessException on updating filename for fileId {}: {}", fileId, e.getMessage(), e);
+          "DataAccessException on updating metadata.originalFilename for fileId {}: {}",
+          fileId,
+          e.getMessage(),
+          e);
       throw new StorageException("Failed to update file metadata: " + e.getMessage(), e);
     }
   }

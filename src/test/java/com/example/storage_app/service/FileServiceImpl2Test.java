@@ -40,6 +40,7 @@ import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteError;
 import com.mongodb.client.gridfs.model.GridFSFile;
+import com.mongodb.client.result.UpdateResult;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -72,6 +73,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.gridfs.GridFsTemplate;
 import org.springframework.web.multipart.MultipartFile;
@@ -89,6 +91,7 @@ class FileServiceImpl2Test {
   @Mock private FileMetadataBuilder fileMetadataBuilder;
   @Mock private FileMapper fileMapper;
   @Mock private GridFsHelper gridFsHelper;
+  @Mock private MongoTemplate mongoTemplate;
 
   @Mock private MultipartFile mockFile;
 
@@ -240,6 +243,21 @@ class FileServiceImpl2Test {
                   fr.getSize(),
                   "/api/v1/files/download/" + fr.getToken());
             });
+
+    lenient()
+        .when(
+            mongoTemplate.updateFirst(
+                any(Query.class),
+                any(org.springframework.data.mongodb.core.query.Update.class),
+                eq(FileRecord.class)))
+        .thenReturn(UpdateResult.acknowledged(1, 1L, null));
+    lenient()
+        .when(
+            mongoTemplate.updateFirst(
+                any(Query.class),
+                any(org.springframework.data.mongodb.core.query.Update.class),
+                eq("fs.files")))
+        .thenReturn(UpdateResult.acknowledged(1, 1L, null));
   }
 
   // Tests for uploadFile start here
@@ -563,7 +581,18 @@ class FileServiceImpl2Test {
 
     when(fileRecordRepository.findByFilename(testFileId))
         .thenReturn(Optional.of(existingRecord)); // Changed findById to findByFilename
-    when(fileRecordRepository.save(any(FileRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files")))
+        .thenReturn(UpdateResult.acknowledged(1L, 1L, null));
+
     when(fileMapper.fromEntity(any(FileRecord.class)))
         .thenAnswer(
             inv -> {
@@ -584,9 +613,20 @@ class FileServiceImpl2Test {
     assertNotNull(response);
     assertEquals(updateRequest.newFilename(), response.filename());
     verify(fileRecordRepository).findByFilename(testFileId); // Verify findByFilename
-    verify(fileRecordRepository)
-        .save(argThat(record -> updateRequest.newFilename().equals(record.getOriginalFilename())));
-    verify(fileMapper).fromEntity(any(FileRecord.class));
+    verify(mongoTemplate)
+        .updateFirst(
+            argThat(query -> query.getQueryObject().getString("filename").equals(testFileId)),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files"));
+    verify(fileMapper)
+        .fromEntity(
+            argThat(record -> updateRequest.newFilename().equals(record.getOriginalFilename())));
   }
 
   @Test
@@ -595,7 +635,16 @@ class FileServiceImpl2Test {
         FileRecord.builder().id(testFileId).originalFilename("old.txt").ownerId(testUserId).build();
     when(fileRecordRepository.findByFilename(eq(testFileId)))
         .thenReturn(Optional.of(initialRecord));
-    when(fileRecordRepository.save(any(FileRecord.class)))
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files")))
         .thenThrow(
             new org.springframework.dao.DuplicateKeyException(
                 "E11000 duplicate key error collection: fs.files index: owner_filename_idx dup key: { ... }"));
@@ -605,7 +654,17 @@ class FileServiceImpl2Test {
         () -> fileService.updateFileDetails(testUserId, testFileId, updateRequest));
 
     verify(fileRecordRepository).findByFilename(eq(testFileId));
-    verify(fileRecordRepository).save(any(FileRecord.class));
+    verify(mongoTemplate)
+        .updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files"));
   }
 
   @Test
@@ -614,7 +673,16 @@ class FileServiceImpl2Test {
         FileRecord.builder().id(testFileId).originalFilename("old.txt").ownerId(testUserId).build();
     when(fileRecordRepository.findByFilename(eq(testFileId)))
         .thenReturn(Optional.of(initialRecord));
-    when(fileRecordRepository.save(any(FileRecord.class)))
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files")))
         .thenThrow(new StorageException("Simulated save failure"));
 
     assertThrows(
@@ -622,7 +690,17 @@ class FileServiceImpl2Test {
         () -> fileService.updateFileDetails(testUserId, testFileId, updateRequest));
 
     verify(fileRecordRepository).findByFilename(eq(testFileId));
-    verify(fileRecordRepository).save(any(FileRecord.class));
+    verify(mongoTemplate)
+        .updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", org.bson.Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(updateRequest.newFilename())),
+            eq("fs.files"));
   }
 
   @Test

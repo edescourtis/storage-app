@@ -17,6 +17,7 @@ import com.example.storage_app.util.GridFsHelper;
 import com.mongodb.MongoWriteException;
 import com.mongodb.WriteError;
 import com.mongodb.client.gridfs.model.GridFSFile;
+import com.mongodb.client.result.UpdateResult;
 import java.io.IOException;
 import java.util.Date;
 import java.util.Optional;
@@ -31,6 +32,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
 import org.springframework.data.mongodb.gridfs.GridFsTemplate;
@@ -55,6 +57,8 @@ class FileServiceImpl3Test {
   private GridFsHelper gridFsHelper; // Though not directly used in download, it's a dependency
 
   @Mock private FileRecordRepository fileRecordRepository;
+
+  @Mock private MongoTemplate mongoTemplate;
 
   @InjectMocks private FileServiceImpl fileService;
 
@@ -84,6 +88,22 @@ class FileServiceImpl3Test {
             new Document());
 
     // mockGridFsResource is already a mock
+
+    // Leniently mock mongoTemplate.updateFirst to return a successful update by default
+    lenient()
+        .when(
+            mongoTemplate.updateFirst(
+                any(Query.class),
+                any(org.springframework.data.mongodb.core.query.Update.class),
+                eq(FileRecord.class)))
+        .thenReturn(UpdateResult.acknowledged(1, 1L, null));
+    lenient()
+        .when(
+            mongoTemplate.updateFirst(
+                any(Query.class),
+                any(org.springframework.data.mongodb.core.query.Update.class),
+                eq("fs.files")))
+        .thenReturn(UpdateResult.acknowledged(1, 1L, null));
   }
 
   @Test
@@ -226,16 +246,41 @@ class FileServiceImpl3Test {
             fileId, "new_updated_filename.txt", Visibility.PUBLIC, null, null, null, 0L, null);
 
     when(fileRecordRepository.findByFilename(fileId)).thenReturn(Optional.of(existingRecord));
-    when(fileRecordRepository.save(any(FileRecord.class))).thenReturn(savedRecord);
-    when(fileMapper.fromEntity(savedRecord)).thenReturn(expectedResponse);
+    // Mock mongoTemplate.updateFirst for success
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals("new_updated_filename.txt")),
+            eq("fs.files")))
+        .thenReturn(UpdateResult.acknowledged(1L, 1L, null));
+    when(fileMapper.fromEntity(
+            argThat(record -> record.getOriginalFilename().equals("new_updated_filename.txt"))))
+        .thenReturn(expectedResponse);
 
     FileResponse actualResponse = fileService.updateFileDetails(userId, fileId, updateRequest);
 
     assertEquals(expectedResponse, actualResponse);
     verify(fileRecordRepository).findByFilename(fileId);
-    verify(fileRecordRepository)
-        .save(argThat(record -> record.getOriginalFilename().equals("new_updated_filename.txt")));
-    verify(fileMapper).fromEntity(savedRecord);
+    // Verify mongoTemplate.updateFirst was called
+    verify(mongoTemplate)
+        .updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals("new_updated_filename.txt")),
+            eq("fs.files"));
+    verify(fileMapper)
+        .fromEntity(
+            argThat(record -> record.getOriginalFilename().equals("new_updated_filename.txt")));
   }
 
   @Test
@@ -378,9 +423,17 @@ class FileServiceImpl3Test {
     existingRecord.setOriginalFilename("old_name.txt");
 
     when(fileRecordRepository.findByFilename(fileId)).thenReturn(Optional.of(existingRecord));
-    // Simulate DuplicateKeyException when save is called with the record having the new name
-    when(fileRecordRepository.save(
-            argThat(record -> record.getOriginalFilename().equals(newConflictingName))))
+    // Simulate DuplicateKeyException when mongoTemplate.updateFirst is called
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(newConflictingName)),
+            eq("fs.files")))
         .thenThrow(new DuplicateKeyException("Simulated DKE for owner_filename_idx"));
 
     Exception exception =
@@ -395,7 +448,18 @@ class FileServiceImpl3Test {
             .getMessage()
             .contains("Filename '" + newConflictingName + "' already exists for this user"));
     verify(fileRecordRepository).findByFilename(fileId);
-    verify(fileRecordRepository).save(any(FileRecord.class));
+    // Verify mongoTemplate.updateFirst was called
+    verify(mongoTemplate)
+        .updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(newConflictingName)),
+            eq("fs.files"));
   }
 
   @Test
@@ -413,7 +477,17 @@ class FileServiceImpl3Test {
     existingRecord.setOriginalFilename("old_name.txt");
 
     when(fileRecordRepository.findByFilename(fileId)).thenReturn(Optional.of(existingRecord));
-    when(fileRecordRepository.save(argThat(record -> record.getOriginalFilename().equals(newName))))
+    // Simulate DataAccessException from mongoTemplate.updateFirst
+    when(mongoTemplate.updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(newName)),
+            eq("fs.files")))
         .thenThrow(
             new org.springframework.dao.DataAccessException("Simulated DataAccessException") {});
 
@@ -426,7 +500,18 @@ class FileServiceImpl3Test {
 
     assertTrue(exception.getMessage().contains("Failed to update file metadata"));
     verify(fileRecordRepository).findByFilename(fileId);
-    verify(fileRecordRepository).save(any(FileRecord.class));
+    // Verify mongoTemplate.updateFirst was called
+    verify(mongoTemplate)
+        .updateFirst(
+            any(Query.class),
+            argThat(
+                update ->
+                    update
+                        .getUpdateObject()
+                        .get("$set", Document.class)
+                        .getString("metadata.originalFilename")
+                        .equals(newName)),
+            eq("fs.files"));
   }
 
   // Tests for uploadFile method
