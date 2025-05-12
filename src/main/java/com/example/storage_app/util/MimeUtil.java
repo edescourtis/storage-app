@@ -1,5 +1,6 @@
 package com.example.storage_app.util;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import org.apache.tika.Tika;
@@ -15,7 +16,8 @@ public class MimeUtil {
    * start) along with the detected type.
    */
   public static Detected detect(InputStream raw) throws IOException {
-    LookaheadInputStream lookahead = new LookaheadInputStream(raw, LOOKAHEAD);
+    BufferedInputStream buffered = new BufferedInputStream(raw);
+    LookaheadInputStream lookahead = new LookaheadInputStream(buffered, LOOKAHEAD);
     // detect content type (reads up to LOOKAHEAD bytes, then we reset)
     String type = tika.detect(lookahead);
     lookahead.reset();

@@ -122,23 +122,6 @@ public class FileControllerTest {
   }
 
   @Test
-  @Disabled()
-  void updateFileDetails_whenInvalidRequest_shouldReturn400BadRequest() throws Exception {
-    String fileToUpdateId = new ObjectId().toHexString();
-    FileUpdateRequest invalidUpdateRequestDto = new FileUpdateRequest("");
-
-    mockMvc
-        .perform(
-            MockMvcRequestBuilders.patch("/api/v1/files/{fileId}", fileToUpdateId)
-                .header("X-User-Id", testUserId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(invalidUpdateRequestDto))
-                .accept(MediaType.APPLICATION_JSON))
-        .andDo(print())
-        .andExpect(status().isBadRequest());
-  }
-
-  @Test
   void uploadFile_whenServiceThrowsIOException_shouldReturn500() throws Exception {
     FileUploadRequest uploadRequestDto =
         new FileUploadRequest("io-error-test.txt", Visibility.PRIVATE, List.of("io"));

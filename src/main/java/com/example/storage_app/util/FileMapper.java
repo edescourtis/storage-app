@@ -57,7 +57,7 @@ public class FileMapper {
   public FileResponse fromEntity(FileRecord fileRecord) {
     if (fileRecord == null) return null;
     return new FileResponse(
-        fileRecord.getId(),
+        fileRecord.getFilename(),
         fileRecord.getOriginalFilename(),
         fileRecord.getVisibility(),
         fileRecord.getTags(),

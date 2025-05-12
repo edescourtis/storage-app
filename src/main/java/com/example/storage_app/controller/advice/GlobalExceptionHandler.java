@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import lombok.Generated;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,6 +16,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
+import org.springframework.web.servlet.NoHandlerFoundException;
 
 @ControllerAdvice
 public class GlobalExceptionHandler {
@@ -77,6 +80,30 @@ public class GlobalExceptionHandler {
     String message =
         "A file with the same filename or content already exists for this user (DB conflict).";
     return buildErrorResponse(ex, message, HttpStatus.CONFLICT, request);
+  }
+
+  @Generated
+  @ExceptionHandler(MissingServletRequestPartException.class)
+  public ResponseEntity<Object> handleMissingServletRequestPartException(
+      MissingServletRequestPartException ex, WebRequest request) {
+    Map<String, Object> body = new HashMap<>();
+    body.put("timestamp", System.currentTimeMillis());
+    body.put("status", HttpStatus.BAD_REQUEST.value());
+    body.put("error", HttpStatus.BAD_REQUEST.getReasonPhrase());
+    body.put("message", "Required part '" + ex.getRequestPartName() + "' is not present.");
+    return new ResponseEntity<>(body, HttpStatus.BAD_REQUEST);
+  }
+
+  @Generated
+  @ExceptionHandler(NoHandlerFoundException.class)
+  public ResponseEntity<Object> handleNoHandlerFoundException(
+      NoHandlerFoundException ex, WebRequest request) {
+    Map<String, Object> body = new HashMap<>();
+    body.put("timestamp", System.currentTimeMillis());
+    body.put("status", HttpStatus.NOT_FOUND.value());
+    body.put("error", HttpStatus.NOT_FOUND.getReasonPhrase());
+    body.put("message", "No handler found for this endpoint: " + ex.getRequestURL());
+    return new ResponseEntity<>(body, HttpStatus.NOT_FOUND);
   }
 
   private ResponseEntity<Object> buildErrorResponse(

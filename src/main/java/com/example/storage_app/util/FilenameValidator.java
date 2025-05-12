@@ -44,6 +44,10 @@ public class FilenameValidator implements ConstraintValidator<ValidFilename, Str
     if (value.codePointCount(0, value.length()) > MAX_FILENAME_CODE_POINTS) {
       return false;
     }
+    // Reject special dot filenames
+    if (".".equals(value.trim()) || "..".equals(value.trim())) {
+      return false;
+    }
     return true;
   }
 }

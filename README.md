@@ -26,7 +26,7 @@ A minimal RESTful application for storing and retrieving files using Spring Boot
 1.  **MongoDB Setup**:
     Ensure you have a MongoDB instance running. You can use Docker:
     ```bash
-    docker-compose up -d mongo 
+    docker compose up -d mongo
     ```
     This will start a MongoDB instance accessible on `localhost:27017`.
 
@@ -42,7 +42,7 @@ A minimal RESTful application for storing and retrieving files using Spring Boot
 
 To build the application Docker image:
 ```bash
-mvn spring-boot:build-image -Dspring-boot.build-image.imageName=your-dockerhub-username/storage-app
+docker compose build app
 ```
 (Replace `your-dockerhub-username` if you plan to push it)
 
@@ -58,18 +58,18 @@ This will produce `storage-app-0.0.1-SNAPSHOT.jar` in the `target/` directory. T
 
 Then, you can build the Docker image using the Docker CLI:
 ```bash
-docker build -t your-image-name:latest .
+docker compose build app
 ```
 
 ### Running with Docker Compose
 
-Once the image is built (either via `spring-boot:build-image` or `docker build`), you can run the entire application using Docker Compose:
+Once the image is built (either via `spring-boot:build-image` or `docker compose build`), you can run the entire application using Docker Compose:
 ```bash
-docker-compose up -d app
+docker compose up -d --build
 ```
 Or, for development with live reload (this will build the image using the Dockerfile if not present):
 ```bash
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build app
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build app
 ```
 
 ## API Documentation
@@ -321,18 +321,35 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
-      - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+      - ./init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
     command: ["--replSet", "rs0", "--bind_ip_all"]
 
 volumes:
   mongo-data:
 ```
 
-And create a file named `init-mongo.js` in your project root with the following contents:
+And create a file named `init-mongo.sh` in your project root with the following contents:
 
-```
-// init-mongo.js
-rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]});
+```bash
+#!/bin/bash
+
+# Wait for MongoDB to be ready
+until mongosh --eval "print(\"waited for connection\")"; do
+  sleep 2
+  echo "Waiting for MongoDB to be available..."
+done
+
+# Check if the replica set is already initialized
+IS_INIT=$(mongosh --quiet --eval 'rs.status().ok' || echo "0")
+
+if [ "$IS_INIT" != "1" ]; then
+  echo "Initializing replica set..."
+  mongosh --eval 'rs.initiate()'
+else
+  echo "Replica set already initialized."
+fi
 ```
 
 This will ensure the replica set is initialized on first startup. The application will not work correctly with a standalone (non-replica set) MongoDB instance. 
+
+- Visit [http://localhost:8080](http://localhost:8080). 
