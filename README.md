@@ -1,3 +1,5 @@
+[![codecov](https://codecov.io/gh/edescourtis/storage-app/branch/main/graph/badge.svg)](https://codecov.io/gh/edescourtis/storage-app)
+
 # STORAGE Application
 
 A RESTful Spring Boot application for storing, sharing, and managing files, designed for the Teletronics interview project. This README is tailored for reviewers and interviewers.
