@@ -32,8 +32,7 @@ A RESTful Spring Boot application for storing, sharing, and managing files, desi
 
 The app requires MongoDB as a replica set (even single-node) for transactions:
 
-```
-docker compose up -d
+```docker compose up -d
 ```
 - This uses `init-mongo.sh` to auto-initialize the replica set.
 - MongoDB will be available at `localhost:27017`.
@@ -195,6 +194,15 @@ docker compose up -d --build
   - Run all tests: `mvn test`
   - Coverage report: `mvn test` then open `target/site/jacoco/index.html`
   - Key tests: REST controllers, services, parallel upload, edge cases (see `src/test/java/...`)
+
+### Large File Upload Test (>2GiB)
+
+- There is an integration test (`FileStorageHttpIntegrationTest.uploadFile_over2GiB_withApacheHttpClient_shouldSucceed`) that uploads a file slightly larger than 2 GiB using Apache HttpClient.
+- This test is **disabled by default** (annotated with `@Disabled`) to avoid running in CI or low-resource environments.
+- To run it manually:
+  1. Remove or comment out the `@Disabled` annotation in `FileStorageHttpIntegrationTest.java`.
+  2. Run the test with Maven: `mvn -Dtest=FileStorageHttpIntegrationTest test`
+- **Note:** This test requires significant disk space and memory, and may take several minutes to complete. It is intended for local/manual verification of large file support.
 
 ---
 
