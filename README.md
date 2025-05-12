@@ -9,6 +9,7 @@ A RESTful Spring Boot application for storing, sharing, and managing files, desi
 ## Project Overview
 
 **STORAGE** provides a robust API for users to upload, list, update, and download files with:
+
 - Per-user file isolation
 - Visibility (PUBLIC/PRIVATE)
 - Tagging (up to 5 tags per file, case-insensitive)
@@ -24,6 +25,7 @@ A RESTful Spring Boot application for storing, sharing, and managing files, desi
 ## How to Run
 
 ### Prerequisites
+
 - Java 21
 - Maven 3.8+
 - Docker & Docker Compose
@@ -32,22 +34,27 @@ A RESTful Spring Boot application for storing, sharing, and managing files, desi
 
 The app requires MongoDB as a replica set (even single-node) for transactions:
 
-```docker compose up -d
 ```
+docker compose up -d
+```
+
 - This uses `init-mongo.sh` to auto-initialize the replica set.
 - MongoDB will be available at `localhost:27017`.
 
 ### 2. Run the Application
 
 **Locally (dev):**
+
 ```bash
 mvn spring-boot:run
 ```
 
 **With Docker Compose:**
+
 ```bash
 docker compose up -d --build
 ```
+
 - The app will be available at [http://localhost:8080](http://localhost:8080)
 
 ---
@@ -58,18 +65,22 @@ docker compose up -d --build
 **User Identification:** All endpoints requiring user context expect an `X-User-Id` header (e.g., `X-User-Id: user123`).
 
 ### 1. Upload File
+
 - **POST** `/api/v1/files`
 - **Headers:** `X-User-Id: <USER_ID>` (required)
 - **Form Parts:**
   - `file`: The file to upload (required)
   - `properties`: JSON (Content-Type: application/json), e.g.:
+
     ```json
     { "filename": "myfile.txt", "visibility": "PRIVATE", "tags": ["tag1"] }
     ```
+
     - `filename` (string, required): Desired filename (must be unique per user, validated)
     - `visibility` (string, required): `PUBLIC` or `PRIVATE`
     - `tags` (array of strings, optional, max 5): Tags (case-insensitive, created if new)
 - **Response:** 201 Created
+
   ```json
   {
     "id": "<uuid>",
@@ -82,8 +93,10 @@ docker compose up -d --build
     "downloadLink": "/api/v1/files/download/<token>"
   }
   ```
+
 - **Errors:** 400 (validation), 409 (duplicate), 500 (server)
 - **Example cURL:**
+
   ```bash
   curl -X POST -H "X-User-Id: user123" \
     -F "file=@test.txt" \
@@ -92,6 +105,7 @@ docker compose up -d --build
   ```
 
 ### 2. List Files
+
 - **GET** `/api/v1/files`
 - **Headers:** Optional `X-User-Id` (lists user's files if present, otherwise all PUBLIC files)
 - **Query Parameters:**
@@ -101,6 +115,7 @@ docker compose up -d --build
   - `page` (int, optional, default: `0`): Page number (0-indexed)
   - `size` (int, optional, default: `10`): Results per page
 - **Response:** 200 OK
+
   ```json
   {
     "content": [
@@ -121,38 +136,48 @@ docker compose up -d --build
     ...
   }
   ```
+
 - **Example cURL (list all public files, tag=tag1, sort by filename):**
+
   ```bash
   curl -X GET "http://localhost:8080/api/v1/files?tag=tag1&sortBy=filename&sortDir=asc&page=0&size=5"
   ```
+
 - **Example cURL (list files for user):**
+
   ```bash
   curl -X GET -H "X-User-Id: user123" "http://localhost:8080/api/v1/files?page=0&size=5"
   ```
 
 ### 3. Download File
+
 - **GET** `/api/v1/files/download/{token}`
 - **Path Parameter:**
   - `token` (string, required): Unique download token from upload/list response
 - **Response:** 200 OK, file content (with correct Content-Type and Content-Disposition headers)
 - **Errors:** 404 if not found
 - **Example cURL:**
+
   ```bash
   curl -X GET http://localhost:8080/api/v1/files/download/<token> -o downloaded_file.txt
   ```
 
 ### 4. Update Filename
+
 - **PATCH** `/api/v1/files/{fileId}`
 - **Headers:** `X-User-Id: <USER_ID>` (required)
 - **Path Parameter:**
   - `fileId` (string, required): File ID from upload/list response
 - **Body:**
+
   ```json
   { "newFilename": "newname.txt" }
   ```
+
 - **Response:** 200 OK, updated file metadata (same as upload response)
 - **Errors:** 400 (validation), 404 (not found/not owned), 409 (duplicate)
 - **Example cURL:**
+
   ```bash
   curl -X PATCH -H "X-User-Id: user123" \
     -H "Content-Type: application/json" \
@@ -161,6 +186,7 @@ docker compose up -d --build
   ```
 
 ### 5. Delete File
+
 - **DELETE** `/api/v1/files/{fileId}`
 - **Headers:** `X-User-Id: <USER_ID>` (required)
 - **Path Parameter:**
@@ -168,11 +194,13 @@ docker compose up -d --build
 - **Response:** 204 No Content
 - **Errors:** 404 if not found or not owned by user
 - **Example cURL:**
+
   ```bash
   curl -X DELETE -H "X-User-Id: user123" http://localhost:8080/api/v1/files/<fileId>
   ```
 
 ### Error Response Structure
+
 ```json
 {
   "timestamp": 1678886400000,
@@ -220,6 +248,7 @@ docker compose up -d --build
 ---
 
 ## Requirements Coverage (Checklist)
+
 - [x] Upload with filename, visibility, tags (up to 5)
 - [x] No file size limit (tested up to 2GB+)
 - [x] Change filename without re-upload
@@ -243,6 +272,7 @@ docker compose up -d --build
 ---
 
 ## Reviewer Notes
+
 - **Parallel upload and edge case tests** are in integration tests.
 - **No UI, no user/session endpoints**—user ID is always via header.
 - **MongoDB indexes**: Indexes are created automatically at startup by the application (see `MongoIndexEnsurer.java`). No manual setup required. For details, see `CONSIDERATIONS.md`.
