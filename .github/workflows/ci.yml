@@ -43,6 +43,7 @@ jobs:
         with:
           files: target/site/jacoco/jacoco.xml
           fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   build_docker_image:
     name: Build Docker Image
