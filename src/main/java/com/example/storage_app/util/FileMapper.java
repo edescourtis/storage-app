@@ -58,7 +58,7 @@ public class FileMapper {
     if (fileRecord == null) return null;
     return new FileResponse(
         fileRecord.getId(),
-        fileRecord.getFilename(),
+        fileRecord.getOriginalFilename(),
         fileRecord.getVisibility(),
         fileRecord.getTags(),
         fileRecord.getUploadDate(),

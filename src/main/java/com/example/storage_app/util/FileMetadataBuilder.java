@@ -23,6 +23,7 @@ public class FileMetadataBuilder {
       userProvidedFilename = file.getOriginalFilename();
     }
     return FileRecord.builder()
+        .id(systemFilenameUUID)
         .filename(systemFilenameUUID)
         .uploadDate(new Date())
         .contentType(file.getContentType())

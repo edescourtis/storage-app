@@ -17,12 +17,13 @@ import org.springframework.data.mongodb.core.mapping.Field;
 @CompoundIndexes({
   @CompoundIndex(
       name = "owner_filename_idx",
-      def = "{'metadata.ownerId': 1, 'filename': 1}",
+      def = "{'metadata.ownerId': 1, 'metadata.originalFilename': 1}",
       unique = true),
   @CompoundIndex(
       name = "owner_sha256_idx",
       def = "{'metadata.ownerId': 1, 'metadata.sha256': 1}",
-      unique = true)
+      unique = true,
+      sparse = true)
 })
 @Data
 @NoArgsConstructor
@@ -33,20 +34,36 @@ public class FileRecord {
 
   @Indexed private String filename;
 
-  @Indexed private Date uploadDate;
-
-  @Indexed private String contentType;
-
   @Field("length")
   @Indexed
   private long size;
 
-  private String ownerId;
-  private Visibility visibility;
-  private List<String> tags;
-  private String sha256;
+  @Field("metadata.originalFilename")
   private String originalFilename;
 
+  @Field("metadata.uploadDate")
+  @Indexed
+  private Date uploadDate;
+
+  @Field("metadata.contentType")
+  @Indexed
+  private String contentType;
+
+  @Field("metadata.ownerId")
+  private String ownerId;
+
+  @Field("metadata.visibility")
+  @Indexed
+  private Visibility visibility;
+
+  @Field("metadata.tags")
+  @Indexed
+  private List<String> tags;
+
+  @Field("metadata.sha256")
+  private String sha256;
+
+  @Field("metadata.token")
   @Indexed(unique = true, name = "download_token_idx")
   private String token;
 }

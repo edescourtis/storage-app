@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.multipart.MultipartFile;
 
 public interface FileService {
@@ -17,7 +18,7 @@ public interface FileService {
   Page<FileResponse> listFiles(
       String userId, String tag, String sortBy, String sortDir, int page, int size);
 
-  GridFsResource downloadFile(String token);
+  ResponseEntity<GridFsResource> downloadFile(String token) throws IOException;
 
   FileResponse updateFileDetails(String userId, String fileId, FileUpdateRequest request);
 

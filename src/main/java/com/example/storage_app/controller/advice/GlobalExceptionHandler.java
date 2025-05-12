@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -68,6 +69,14 @@ public class GlobalExceptionHandler {
   @ExceptionHandler(Exception.class)
   public ResponseEntity<Object> handleAllOtherExceptions(Exception ex, WebRequest request) {
     return buildErrorResponse(ex, ex.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR, request);
+  }
+
+  @ExceptionHandler(DuplicateKeyException.class)
+  public ResponseEntity<Object> handleDuplicateKeyException(
+      DuplicateKeyException ex, WebRequest request) {
+    String message =
+        "A file with the same filename or content already exists for this user (DB conflict).";
+    return buildErrorResponse(ex, message, HttpStatus.CONFLICT, request);
   }
 
   private ResponseEntity<Object> buildErrorResponse(

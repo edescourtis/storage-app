@@ -15,10 +15,16 @@ public interface FileRecordRepository extends MongoRepository<FileRecord, String
 
   Optional<FileRecord> findByOwnerIdAndOriginalFilename(String ownerId, String originalFilename);
 
+  Optional<FileRecord> findByFilename(String filename);
+
   Page<FileRecord> findByOwnerId(String ownerId, Pageable pageable);
+
+  Page<FileRecord> findByOwnerIdAndTagsContaining(String ownerId, String tag, Pageable pageable);
 
   Page<FileRecord> findByVisibility(String visibility, Pageable pageable);
 
   Page<FileRecord> findByVisibilityAndTagsContaining(
       String visibility, String tag, Pageable pageable);
+
+  Optional<FileRecord> findByToken(String token);
 }

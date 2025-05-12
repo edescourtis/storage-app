@@ -1,3 +1,7 @@
 package com.example.storage_app.controller.dto;
 
-public record FileUpdateRequest(String newFilename) {}
+import com.example.storage_app.util.ValidFilename;
+import jakarta.validation.constraints.NotBlank;
+
+public record FileUpdateRequest(
+    @ValidFilename @NotBlank(message = "Filename must not be blank") String newFilename) {}

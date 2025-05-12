@@ -3,18 +3,14 @@ package com.example.storage_app.controller;
 import com.example.storage_app.controller.dto.FileResponse;
 import com.example.storage_app.controller.dto.FileUpdateRequest;
 import com.example.storage_app.controller.dto.FileUploadRequest;
-import com.example.storage_app.exception.StorageException;
 import com.example.storage_app.service.FileService;
 import jakarta.validation.Valid;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.NoSuchAlgorithmException;
-import org.springframework.core.io.Resource;
 import org.springframework.data.domain.Page;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -69,23 +65,9 @@ public class FileController {
   }
 
   @GetMapping("/download/{token}")
-  public ResponseEntity<Resource> downloadFile(@PathVariable String token) throws IOException {
-    GridFsResource resource = fileService.downloadFile(token);
-
-    HttpHeaders headers = new HttpHeaders();
-    String contentType = resource.getContentType();
-    headers.setContentType(
-        contentType != null
-            ? MediaType.parseMediaType(contentType)
-            : MediaType.APPLICATION_OCTET_STREAM);
-    try {
-      headers.setContentLength(resource.contentLength());
-    } catch (IOException e) {
-      throw new StorageException("Error reading file content length: " + e.getMessage(), e);
-    }
-    headers.setContentDispositionFormData("attachment", resource.getFilename());
-
-    return ResponseEntity.ok().headers(headers).body(resource);
+  public ResponseEntity<GridFsResource> downloadFile(@PathVariable String token)
+      throws IOException {
+    return fileService.downloadFile(token);
   }
 
   @PatchMapping("/{fileId}")
