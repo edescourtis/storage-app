@@ -3,6 +3,7 @@ package com.example.storage_app.controller;
 import com.example.storage_app.controller.dto.FileResponse;
 import com.example.storage_app.controller.dto.FileUpdateRequest;
 import com.example.storage_app.controller.dto.FileUploadRequest;
+import com.example.storage_app.controller.dto.PagedResponse;
 import com.example.storage_app.service.FileService;
 import jakarta.validation.Valid;
 import java.io.IOException;
@@ -52,7 +53,7 @@ public class FileController {
   }
 
   @GetMapping
-  public ResponseEntity<Page<FileResponse>> listFiles(
+  public ResponseEntity<PagedResponse<FileResponse>> listFiles(
       @RequestHeader(name = "X-User-Id", required = false) String userId,
       @RequestParam(required = false) String tag,
       @RequestParam(defaultValue = "uploadDate") String sortBy,
@@ -61,7 +62,17 @@ public class FileController {
       @RequestParam(defaultValue = "10") int size) {
     Page<FileResponse> responsePage =
         fileService.listFiles(userId, tag, sortBy, sortDir, page, size);
-    return ResponseEntity.ok(responsePage);
+    PagedResponse<FileResponse> dto =
+        new PagedResponse<>(
+            responsePage.getContent(),
+            responsePage.getNumber(),
+            responsePage.getSize(),
+            responsePage.getTotalPages(),
+            responsePage.getTotalElements(),
+            responsePage.isLast(),
+            responsePage.isFirst(),
+            responsePage.getNumberOfElements());
+    return ResponseEntity.ok(dto);
   }
 
   @GetMapping("/download/{token}")
