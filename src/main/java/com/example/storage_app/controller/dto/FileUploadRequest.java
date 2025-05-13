@@ -10,4 +10,6 @@ import java.util.List;
 public record FileUploadRequest(
     @ValidFilename @NotBlank(message = "Filename must not be blank") String filename,
     @NotNull(message = "Visibility must be provided") Visibility visibility,
-    @Size(max = 5, message = "A maximum of 5 tags are allowed") List<String> tags) {}
+    @Size(max = 5, message = "A maximum of 5 tags are allowed")
+        List<@Size(max = 20, message = "Each tag must be at most 20 characters long") String>
+            tags) {}
